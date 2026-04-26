@@ -11,18 +11,23 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import Message
 
-# === ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ===
-BOT_TOKEN = os.getenv("BOT_API_TOKEN")  # ИЗМЕНЕНО: было TELEGRAM_BOT_TOKEN
-GROQ_API_KEYS_RAW = os.getenv("GROQ_API_KEYS", "")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "6689292068"))
+# === ТВОИ API КЛЮЧИ (прямо в коде) ===
+BOT_TOKEN = "8644894856:AAGRX-aggF3oc6shx6QGhFYACf00S4mddXE"
 
-# === РАЗБИРАЕМ КЛЮЧИ ===
-GROQ_API_KEYS = [key.strip() for key in GROQ_API_KEYS_RAW.split(",") if key.strip()]
+# Ключи Groq (3 аккаунта)
+GROQ_API_KEYS = [
+    "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",
+    "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",
+    "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"
+]
 
+ADMIN_ID = 6689292068
+
+# === ПРОВЕРКА ===
 if not BOT_TOKEN:
-    raise ValueError("BOT_API_TOKEN not found! Add it to environment variables.")
+    raise ValueError("BOT_TOKEN не найден!")
 if not GROQ_API_KEYS:
-    print("⚠️ ВНИМАНИЕ: GROQ_API_KEYS не заданы! Бот будет работать в демо-режиме.")
+    raise ValueError("GROQ_API_KEYS не найдены!")
 
 # === КОНФИГУРАЦИЯ ===
 MODEL = "qwen/qwen3-32b"
@@ -36,11 +41,9 @@ SYSTEM_PROMPT = """Ты — ChatGPT, полезный и умный ИИ-асс�
 ПРАВИЛА ИСПОЛЬЗОВАНИЯ МАТА:
 - Если пользователь пишет вежливо → отвечай вежливо, без мата
 - Если пользователь использует мат → можешь тоже использовать лёгкий мат в ответ, но НЕ оскорбляй
-- Мат только как поддержка стиля общения, не как оскорбление
 
 ОСНОВНЫЕ ПРАВИЛА:
 - Отвечай на русском языке понятно и информативно
-- Ты нейтрален, вежлив и тактичен
 - Ты помнишь контекст разговора в этой группе или чате
 - Ты запоминаешь важную информацию, которую пользователи тебе говорят"""
 
@@ -165,7 +168,7 @@ async def ask_groq(prompt: str, chat_id: int, username: str = None) -> str:
     global current_key_index
     
     if not GROQ_API_KEYS:
-        return "⚠️ API ключи Groq не настроены. Добавьте GROQ_API_KEYS в переменные окружения."
+        return "⚠️ API ключи Groq не настроены."
     
     context = get_context(chat_id)
     memory = get_memory(chat_id)
