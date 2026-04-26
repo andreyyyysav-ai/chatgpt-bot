@@ -12,7 +12,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 # === ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ===
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_API_TOKEN")  # ИЗМЕНЕНО: было TELEGRAM_BOT_TOKEN
 GROQ_API_KEYS_RAW = os.getenv("GROQ_API_KEYS", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "6689292068"))
 
@@ -20,7 +20,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "6689292068"))
 GROQ_API_KEYS = [key.strip() for key in GROQ_API_KEYS_RAW.split(",") if key.strip()]
 
 if not BOT_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN not found!")
+    raise ValueError("BOT_API_TOKEN not found! Add it to environment variables.")
 if not GROQ_API_KEYS:
     print("⚠️ ВНИМАНИЕ: GROQ_API_KEYS не заданы! Бот будет работать в демо-режиме.")
 
@@ -30,7 +30,7 @@ FREE_WAIT = 15
 MAX_CONTEXT = 30
 MAX_MEMORY = 30
 
-# === СИСТЕМНЫЙ ПРОМПТ (как ChatGPT, но с поддержкой мата если надо) ===
+# === СИСТЕМНЫЙ ПРОМПТ ===
 SYSTEM_PROMPT = """Ты — ChatGPT, полезный и умный ИИ-ассистент.
 
 ПРАВИЛА ИСПОЛЬЗОВАНИЯ МАТА:
@@ -230,8 +230,8 @@ HELP_TEXT = """
 Напиши `/ask вопрос` или ответь на моё сообщение
 
 🧠 **Мои возможности:**
-- Помню последние {} сообщений группы
-- Запоминаю важную информацию по команде "запомни"
+- Помню последние 30 сообщений группы
+- Запоминаю важную информацию
 - Бесплатно, 15 секунд ожидания
 
 📋 **Команды:**
@@ -239,8 +239,7 @@ HELP_TEXT = """
 /help - это сообщение
 /stats - статистика группы
 /top - топ активных участников
-/clear - очистить историю (только админ)
-""".format(MAX_CONTEXT)
+"""
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
@@ -287,21 +286,6 @@ async def cmd_top(message: Message):
             name = str(uid)
         text += f"{medals[i]} {name}: {count} обращений\n"
     await message.answer(text, parse_mode="Markdown")
-
-@dp.message(Command("clear"))
-async def cmd_clear(message: Message):
-    if message.chat.type == "private":
-        await message.answer("Очистка только в группах для админов")
-        return
-    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-    if member.status not in ["creator", "administrator"]:
-        await message.answer("⛔ Только админ!")
-        return
-    data = load_data()
-    key = str(message.chat.id)
-    data["group_context"][key] = []
-    save_data(data)
-    await message.answer("🗑 История очищена!")
 
 @dp.message(Command("ask"))
 async def cmd_ask(message: Message):
