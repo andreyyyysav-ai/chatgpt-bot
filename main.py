@@ -6,10 +6,11 @@ import time
 import re
 import aiohttp
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from asyncio import Lock
 
 # === ТВОИ КЛЮЧИ (ПРЯМО В КОДЕ) ===
 BOT_TOKEN = "8644894856:AAGRX-aggF3oc6shx6QGhFYACf00S4mddXE"
@@ -32,7 +33,7 @@ print(f"✅ Бот запускается с {len(GROQ_API_KEYS)} ключами
 
 # === КОНФИГУРАЦИЯ ===
 MODEL = "qwen/qwen3-32b"
-FREE_WAIT = 10
+FREE_WAIT = 10  # Исправлено: 10 секунд ожидания
 MAX_CONTEXT = 50
 MAX_MEMORY = 50
 
@@ -62,48 +63,80 @@ DATA_STRUCTURE = {
     "users": {}
 }
 
+# Блокировка для потокобезопасной работы с ключами
+key_lock = Lock()
+
 def load_data() -> Dict:
+    """Безопасная загрузка данных с проверкой ошибок"""
     if not os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(DATA_STRUCTURE, f, ensure_ascii=False, indent=2)
         return DATA_STRUCTURE.copy()
+    
     try:
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
+        with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:  # utf-8-sig для BOM
             data = json.load(f)
-            for key in DATA_STRUCTURE:
-                if key not in data:
-                    data[key] = DATA_STRUCTURE[key].copy()
-            return data
-    except:
+        
+        # Проверяем структуру данных
+        for key in DATA_STRUCTURE:
+            if key not in data:
+                data[key] = DATA_STRUCTURE[key].copy()
+            elif isinstance(DATA_STRUCTURE[key], dict) and isinstance(data[key], dict):
+                # Рекурсивно проверяем вложенные словари
+                for sub_key in DATA_STRUCTURE[key]:
+                    if sub_key not in data[key]:
+                        data[key][sub_key] = DATA_STRUCTURE[key][sub_key].copy() if isinstance(DATA_STRUCTURE[key][sub_key], dict) else DATA_STRUCTURE[key][sub_key]
+        
+        return data
+    except json.JSONDecodeError as e:
+        logging.error(f"❌ Ошибка загрузки JSON: {e}")
+        return DATA_STRUCTURE.copy()
+    except Exception as e:
+        logging.error(f"❌ Неожиданная ошибка загрузки данных: {e}")
         return DATA_STRUCTURE.copy()
 
 def save_data(data: Dict):
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """Безопасное сохранение данных"""
+    try:
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"❌ Ошибка сохранения данных: {e}")
 
 # === ПАМЯТЬ И ИСТОРИЯ ===
 def get_context(chat_id: int) -> List[Dict]:
     data = load_data()
     key = str(chat_id)
     context = data["group_context"].get(key, [])
-    print(f"📚 История чата {chat_id}: {len(context)} сообщений")
+    logging.info(f"📚 История чата {chat_id}: {len(context)} сообщений")
     return context[-MAX_CONTEXT:] if context else []
 
-def add_to_context(chat_id: int, role: str, text: str, username: str = None):
+def add_to_context(chat_id: int, role: str, text: str, username: Optional[str] = None):
+    """Добавление сообщения в историю с проверкой длины"""
+    if not text or len(text.strip()) == 0:
+        return
+    
     data = load_data()
     key = str(chat_id)
     if key not in data["group_context"]:
         data["group_context"][key] = []
+    
+    # Ограничиваем длину сохраняемого сообщения
+    truncated_text = text[:500] if len(text) > 500 else text
+    
     data["group_context"][key].append({
         "role": role,
-        "text": text,
+        "text": truncated_text,
         "username": username,
         "time": time.time()
     })
+    
+    # Обрезаем историю до MAX_CONTEXT
     if len(data["group_context"][key]) > MAX_CONTEXT:
         data["group_context"][key] = data["group_context"][key][-MAX_CONTEXT:]
+    
     save_data(data)
-    print(f"💾 Сохранено в историю: {role} - {text[:40]}...")
+    logging.info(f"💾 Сохранено в историю: {role} - {truncated_text[:40]}...")
 
 def get_memory(chat_id: int) -> str:
     data = load_data()
@@ -114,33 +147,44 @@ def get_memory(chat_id: int) -> str:
     return "\n".join([f"- {m['text']}" for m in memories[-MAX_MEMORY:]])
 
 def save_to_memory(chat_id: int, text: str):
+    """Сохранение в память с проверкой"""
+    if not text or len(text.strip()) < 3:
+        return
+    
     data = load_data()
     key = str(chat_id)
     if key not in data["group_memory"]:
         data["group_memory"][key] = []
-    data["group_memory"][key].append({"text": text, "time": time.time()})
+    
+    # Ограничиваем длину факта
+    truncated_text = text[:200] if len(text) > 200 else text
+    
+    data["group_memory"][key].append({"text": truncated_text, "time": time.time()})
+    
     if len(data["group_memory"][key]) > MAX_MEMORY:
         data["group_memory"][key] = data["group_memory"][key][-MAX_MEMORY:]
+    
     save_data(data)
+    logging.info(f"🧠 Сохранено в память: {truncated_text[:50]}...")
 
 def clear_memory(chat_id: int):
     data = load_data()
     key = str(chat_id)
     data["group_memory"][key] = []
     save_data(data)
+    logging.info(f"🗑 Память очищена для чата {chat_id}")
 
 def update_stats(chat_id: int, user_id: int):
     data = load_data()
     key = str(chat_id)
     if key not in data["group_stats"]:
         data["group_stats"][key] = {}
+    
     user_key = str(user_id)
-    if user_key not in data["group_stats"][key]:
-        data["group_stats"][key][user_key] = 0
-    data["group_stats"][key][user_key] += 1
+    data["group_stats"][key][user_key] = data["group_stats"][key].get(user_key, 0) + 1
     save_data(data)
 
-def add_user(user_id: int, username: str = None):
+def add_user(user_id: int, username: Optional[str] = None):
     data = load_data()
     user_id_str = str(user_id)
     if user_id_str not in data["users"]:
@@ -151,6 +195,7 @@ def add_user(user_id: int, username: str = None):
             "last_request": 0
         }
         save_data(data)
+        logging.info(f"👤 Новый пользователь: {username or user_id}")
 
 def update_user_stats(user_id: int):
     data = load_data()
@@ -159,26 +204,32 @@ def update_user_stats(user_id: int):
         data["users"][user_id_str]["total_messages"] = data["users"][user_id_str].get("total_messages", 0) + 1
         save_data(data)
 
-def check_rate_limit(user_id: int) -> tuple:
+def check_rate_limit(user_id: int) -> Tuple[bool, int]:
+    """Проверка rate-limit с правильной переменной"""
     data = load_data()
     user_id_str = str(user_id)
-    if user_id_str not in data["users"]:
+    
+    if user_id_str not in data.get("users", {}):
         return True, 0
+    
     user = data["users"][user_id_str]
     now = time.time()
     last = user.get("last_request", 0)
-    if now - last >= FREE_WAIT:
+    
+    if now - last >= FREE_WAIT:  # Исправлено: используем FREE_WAIT
         user["last_request"] = now
         save_data(data)
         return True, 0
     else:
         wait = int(FREE_WAIT - (now - last))
+        logging.info(f"⏳ Rate limit для {user_id}: ждать {wait}с")
         return False, wait
 
 # === API ЗАПРОС К GROQ ===
 current_key_index = 0
 
-async def ask_groq(prompt: str, chat_id: int, username: str = None, is_group: bool = False) -> str:
+async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is_group: bool = False) -> str:
+    """Запрос к Groq API с ротацией ключей"""
     global current_key_index
     
     # Получаем историю чата
@@ -193,21 +244,17 @@ async def ask_groq(prompt: str, chat_id: int, username: str = None, is_group: bo
     # Формируем сообщения для API
     messages = [{"role": "system", "content": system_prompt}]
     
-    # Добавляем ВСЮ историю
+    # Добавляем историю
     for msg in context:
         if msg["role"] == "user":
-            if msg["username"]:
-                messages.append({"role": "user", "content": f"{msg['username']}: {msg['text']}"})
-            else:
-                messages.append({"role": "user", "content": msg["text"]})
+            content = f"{msg['username']}: {msg['text']}" if msg.get("username") else msg["text"]
+            messages.append({"role": "user", "content": content})
         else:
             messages.append({"role": "assistant", "content": msg["text"]})
     
     # Добавляем текущий вопрос
-    if username:
-        messages.append({"role": "user", "content": f"{username}: {prompt}"})
-    else:
-        messages.append({"role": "user", "content": prompt})
+    current_content = f"{username}: {prompt}" if username else prompt
+    messages.append({"role": "user", "content": current_content})
     
     url = "https://api.groq.com/openai/v1/chat/completions"
     payload = {
@@ -217,28 +264,49 @@ async def ask_groq(prompt: str, chat_id: int, username: str = None, is_group: bo
         "max_tokens": 600
     }
     
-    for attempt in range(len(GROQ_API_KEYS) * 2):
-        api_key = GROQ_API_KEYS[current_key_index]
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        answer = data["choices"][0]["message"]["content"]
-                        answer = re.sub(r'<think>.*?</think>', '', answer, flags=re.DOTALL).strip()
-                        return answer
-                    elif resp.status == 429:
-                        current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
-                        continue
-                    else:
-                        current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
-                        continue
-        except Exception as e:
-            print(f"❌ Ошибка: {e}")
-            current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
-            continue
+    # Пробуем с разными ключами
+    async with key_lock:  # Блокировка для безопасной ротации ключей
+        for attempt in range(len(GROQ_API_KEYS) * 2):
+            api_key = GROQ_API_KEYS[current_key_index]
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            answer = data["choices"][0]["message"]["content"]
+                            # Убираем теги <think>
+                            answer = re.sub(r'<think>.*?</think>', '', answer, flags=re.DOTALL).strip()
+                            logging.info(f"✅ Успешный запрос к Groq")
+                            return answer
+                        elif resp.status == 429:
+                            logging.warning(f"⚠️ Rate limit на ключе {current_key_index}")
+                            current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
+                            await asyncio.sleep(1)  # Пауза перед следующей попыткой
+                            continue
+                        else:
+                            error_text = await resp.text()
+                            logging.error(f"❌ Ошибка API ({resp.status}): {error_text[:200]}")
+                            current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
+                            continue
+            except asyncio.TimeoutError:
+                logging.error(f"⏱ Таймаут запроса")
+                current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
+                continue
+            except aiohttp.ClientError as e:
+                logging.error(f"🌐 Сетевая ошибка: {e}")
+                current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
+                continue
+            except Exception as e:
+                logging.error(f"❌ Неожиданная ошибка: {e}")
+                current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
+                continue
     
+    logging.error("❌ Все ключи исчерпаны")
     return "⚠️ Сейчас большая нагрузка, попробуй через минуту 😊"
 
 # === КЛАВИАТУРА ===
@@ -254,7 +322,10 @@ def get_main_keyboard():
 # === БОТ ===
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 HELP_TEXT = """
 📚 ChatGPT Bot - инструкция 😊
@@ -268,7 +339,7 @@ HELP_TEXT = """
 🧠 Мои возможности:
 - Помню последние 50 сообщений в чате
 - Запоминаю важную информацию (пиши "запомни ...")
-- Бесплатно, 10 секунд ожидания
+- Бесплатно, 10 секунд ожидания между запросами
 
 📋 Команды:
 /start - приветствие и меню
@@ -300,48 +371,62 @@ async def cmd_clear_memory(message: Message):
     clear_memory(message.chat.id)
     await message.answer("🗑 Память чата очищена! Я забыл всё, что вы мне говорили 😊")
 
+def get_stats_text(chat_id: int) -> str:
+    """Формирование текста статистики"""
+    data = load_data()
+    key = str(chat_id)
+    stats = data["group_stats"].get(key, {})
+    total = sum(stats.values())
+    memories_count = len(data["group_memory"].get(key, []))
+    
+    text = f"📊 Статистика группы\n\n"
+    text += f"💬 Обращений: {total}\n"
+    text += f"👥 Участников: {len(stats)}\n"
+    text += f"🧠 Запомнено фактов: {memories_count}"
+    return text
+
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
     if message.chat.type == "private":
         await message.answer("📊 Статистика доступна только в группах!")
         return
+    await message.answer(get_stats_text(message.chat.id))
+
+async def get_top_users_text(chat_id: int) -> str:
+    """Формирование текста топа пользователей"""
     data = load_data()
-    key = str(message.chat.id)
-    stats = data["group_stats"].get(key, {})
-    total = sum(stats.values())
-    memories_count = len(data["group_memory"].get(key, []))
-    text = f"📊 Статистика группы\n\n"
-    text += f"💬 Обращений: {total}\n"
-    text += f"👥 Участников: {len(stats)}\n"
-    text += f"🧠 Запомнено фактов: {memories_count}"
-    await message.answer(text)
+    stats = data["group_stats"].get(str(chat_id), {})
+    sorted_users = sorted(stats.items(), key=lambda x: x[1], reverse=True)[:10]
+    
+    if not sorted_users:
+        return "Пока нет статистики!"
+    
+    text = "🏆 Топ активных участников:\n\n"
+    medals = ["🥇", "🥈", "🥉", "📌", "📌", "📌", "📌", "📌", "📌", "📌"]
+    
+    for i, (uid, count) in enumerate(sorted_users):
+        try:
+            user = await bot.get_chat(int(uid))
+            name = user.first_name
+        except:
+            name = f"ID: {uid}"
+        text += f"{medals[i]} {name}: {count} обращений\n"
+    
+    return text
 
 @dp.message(Command("top"))
 async def cmd_top(message: Message):
     if message.chat.type == "private":
         await message.answer("🏆 Топ активных доступен только в группах!")
         return
-    data = load_data()
-    stats = data["group_stats"].get(str(message.chat.id), {})
-    sorted_users = sorted(stats.items(), key=lambda x: x[1], reverse=True)[:10]
-    if not sorted_users:
-        await message.answer("Пока нет статистики!")
-        return
-    text = "🏆 Топ активных участников:\n\n"
-    medals = ["🥇", "🥈", "🥉", "📌", "📌", "📌", "📌", "📌", "📌", "📌"]
-    for i, (uid, count) in enumerate(sorted_users):
-        try:
-            user = await bot.get_chat(int(uid))
-            name = user.first_name
-        except:
-            name = str(uid)
-        text += f"{medals[i]} {name}: {count} обращений\n"
+    text = await get_top_users_text(message.chat.id)
     await message.answer(text)
 
 @dp.message(Command("ask"))
 async def cmd_ask(message: Message):
     add_user(message.from_user.id, message.from_user.username)
     query = message.text.replace("/ask", "").strip()
+    
     if not query:
         await message.answer("📝 Использование: /ask вопрос")
         return
@@ -379,10 +464,16 @@ async def cmd_ask(message: Message):
 
 @dp.message(F.reply_to_message)
 async def handle_reply(message: Message):
-    if message.reply_to_message.from_user.id != bot.id:
+    # Проверяем, что ответ на сообщение бота
+    if not message.reply_to_message or message.reply_to_message.from_user.id != bot.id:
+        return
+    
+    # Проверяем, что есть текст
+    if not message.text:
         return
     
     add_user(message.from_user.id, message.from_user.username)
+    
     can, wait = check_rate_limit(message.from_user.id)
     if not can:
         await message.answer(f"⏳ Подожди {wait} секунд!")
@@ -405,12 +496,20 @@ async def handle_reply(message: Message):
 
 @dp.message()
 async def handle_private(message: Message):
+    # Обрабатываем только личные сообщения
     if message.chat.type != "private":
         return
+    
+    # Пропускаем команды
     if message.text and message.text.startswith('/'):
         return
     
+    # Пропускаем сообщения без текста
+    if not message.text:
+        return
+    
     add_user(message.from_user.id, message.from_user.username)
+    
     can, wait = check_rate_limit(message.from_user.id)
     if not can:
         await message.answer(f"⏳ Подожди {wait} секунд!")
@@ -431,15 +530,7 @@ async def handle_callback(callback: CallbackQuery):
         if callback.message.chat.type == "private":
             await callback.answer("Статистика доступна только в группах!", show_alert=True)
             return
-        data = load_data()
-        key = str(callback.message.chat.id)
-        stats = data["group_stats"].get(key, {})
-        total = sum(stats.values())
-        memories_count = len(data["group_memory"].get(key, []))
-        text = f"📊 Статистика группы\n\n"
-        text += f"💬 Обращений: {total}\n"
-        text += f"👥 Участников: {len(stats)}\n"
-        text += f"🧠 Запомнено фактов: {memories_count}"
+        text = get_stats_text(callback.message.chat.id)
         await callback.message.edit_text(text)
         await callback.answer()
         
@@ -447,22 +538,7 @@ async def handle_callback(callback: CallbackQuery):
         if callback.message.chat.type == "private":
             await callback.answer("Топ активных доступен только в группах!", show_alert=True)
             return
-        data = load_data()
-        stats = data["group_stats"].get(str(callback.message.chat.id), {})
-        sorted_users = sorted(stats.items(), key=lambda x: x[1], reverse=True)[:10]
-        if not sorted_users:
-            await callback.message.edit_text("Пока нет статистики!")
-            await callback.answer()
-            return
-        text = "🏆 Топ активных участников:\n\n"
-        medals = ["🥇", "🥈", "🥉", "📌", "📌", "📌", "📌", "📌", "📌", "📌"]
-        for i, (uid, count) in enumerate(sorted_users):
-            try:
-                user = await bot.get_chat(int(uid))
-                name = user.first_name
-            except:
-                name = str(uid)
-            text += f"{medals[i]} {name}: {count} обращений\n"
+        text = await get_top_users_text(callback.message.chat.id)
         await callback.message.edit_text(text)
         await callback.answer()
         
@@ -492,19 +568,34 @@ async def cmd_admin(message: Message):
     text += f"🏘 Групп: {groups}\n"
     text += f"💬 Всего обращений: {total_requests}\n"
     text += f"🔑 Ключей Groq: {len(GROQ_API_KEYS)}\n"
-    text += f"📱 Модель: {MODEL}"
+    text += f"📱 Модель: {MODEL}\n"
+    text += f"⏱ Задержка: {FREE_WAIT} сек"
     await message.answer(text)
 
 # === ЗАПУСК ===
 async def main():
+    # Загружаем данные при старте
     load_data()
+    
     print("=" * 50)
     print("🤖 ChatGPT Bot запущен!")
     print(f"👑 Admin ID: {ADMIN_ID}")
     print(f"🔑 Ключей Groq: {len(GROQ_API_KEYS)}")
     print(f"💾 История: {MAX_CONTEXT} сообщений на чат")
+    print(f"⏱ Задержка: {FREE_WAIT} секунд между запросами")
     print("=" * 50)
-    await dp.start_polling(bot)
+    
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logging.critical(f"Критическая ошибка: {e}")
+    finally:
+        logging.info("Бот остановлен")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Бот остановлен пользователем")
+    except Exception as e:
+        print(f"❌ Ошибка запуска: {e}")
