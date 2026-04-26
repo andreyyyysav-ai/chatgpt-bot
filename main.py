@@ -7,7 +7,6 @@ import time
 from asyncio import Lock
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-from collections import defaultdict
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -25,7 +24,7 @@ GROQ_API_KEYS = [
 ADMIN_ID = 6689292068
 
 # Hugging Face токен для генерации изображений
-HF_API_TOKEN = "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"
+HF_API_TOKEN = "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"
 HF_API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev"
 
 if not BOT_TOKEN:
@@ -70,6 +69,10 @@ current_key_index = 0
 
 # Хранилище лимитов генерации изображений (в памяти)
 generate_limits = {}
+
+# Создаем объекты бота и диспетчера СРАЗУ
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
 
 # ======================== ФУНКЦИИ РАБОТЫ С ДАННЫМИ ========================
@@ -218,10 +221,7 @@ def check_rate_limit(user_id: int) -> Tuple[bool, int]:
 
 # ======================== ФУНКЦИИ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЙ ========================
 def can_generate_image(user_id: int) -> Tuple[bool, int]:
-    """
-    Проверка лимита генерации: 10 изображений в день на пользователя
-    Возвращает (можно_ли, остаток_до_лимита)
-    """
+    """Проверка лимита: 10 изображений в день на пользователя"""
     today = datetime.now().strftime("%Y-%m-%d")
     
     if user_id not in generate_limits:
@@ -230,7 +230,6 @@ def can_generate_image(user_id: int) -> Tuple[bool, int]:
     
     user_limit = generate_limits[user_id]
     
-    # Если день изменился — сбрасываем счетчик
     if user_limit["date"] != today:
         user_limit["date"] = today
         user_limit["count"] = 0
@@ -244,7 +243,6 @@ def can_generate_image(user_id: int) -> Tuple[bool, int]:
 
 
 def increment_generate_count(user_id: int) -> None:
-    """Увеличить счетчик генераций для пользователя"""
     today = datetime.now().strftime("%Y-%m-%d")
     
     if user_id not in generate_limits:
@@ -260,7 +258,6 @@ def increment_generate_count(user_id: int) -> None:
 
 
 def decrement_generate_count(user_id: int) -> None:
-    """Уменьшить счетчик (при ошибке генерации)"""
     today = datetime.now().strftime("%Y-%m-%d")
     
     if user_id in generate_limits:
@@ -270,10 +267,7 @@ def decrement_generate_count(user_id: int) -> None:
 
 
 async def generate_image(prompt: str) -> Optional[bytes]:
-    """
-    Генерация изображения через Hugging Face API
-    Возвращает bytes картинки или None при ошибке
-    """
+    """Генерация изображения через Hugging Face API"""
     headers = {
         "Authorization": f"Bearer {HF_API_TOKEN}",
         "Content-Type": "application/json",
@@ -291,7 +285,6 @@ async def generate_image(prompt: str) -> Optional[bytes]:
                 if resp.status == 200:
                     return await resp.read()
                 elif resp.status == 503:
-                    # Модель загружается — это нормально при первом запуске
                     error_text = await resp.text()
                     logging.warning(f"HF модель загружается: {error_text[:100]}")
                     return None
@@ -451,8 +444,6 @@ async def cmd_help(message: Message) -> None:
 
 @dp.message(Command("draw"))
 async def cmd_draw_help(message: Message) -> None:
-    """Команда /draw — показывает инструкцию по генерации изображений"""
-    # Проверяем остаток лимита
     can, remaining = can_generate_image(message.from_user.id)
     
     await message.answer(
@@ -555,30 +546,24 @@ async def cmd_ask(message: Message) -> None:
 # ======================== ОСНОВНОЙ ОБРАБОТЧИК ГЕНЕРАЦИИ КАРТИНОК ========================
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text_for_generate(message: Message) -> None:
-    """
-    Обработка текстовых сообщений для генерации изображений
-    Логика: в ЛС текст отправляется на генерацию картинки
-    """
-    # Только в личных сообщениях (в группах через /ask)
+    # Только в личных сообщениях
     if message.chat.type != "private":
         return
     
     user_text = message.text.strip()
     
-    # Игнорируем слишком короткие сообщения
     if len(user_text) < 3:
         return
     
-    # Проверяем, не хочет ли пользователь пообщаться с GPT
+    # Ключевые слова для GPT вопросов
     gpt_keywords = ["?" , "что такое", "как сделать", "расскажи", "объясни", "почему", 
                     "кто такой", "где найти", "сколько", "когда", "зачем", "помоги", 
                     "привет", "здравствуй", "как дела"]
     
     is_gpt_question = any(keyword in user_text.lower() for keyword in gpt_keywords)
     
-    # Если явно спрашивает — отправляем в GPT
+    # Если вопрос — отправляем в GPT
     if is_gpt_question and len(user_text) > 5:
-        # Отправляем в GPT
         add_user(message.from_user.id, message.from_user.username)
         can, wait = check_rate_limit(message.from_user.id)
         if not can:
@@ -592,15 +577,7 @@ async def handle_text_for_generate(message: Message) -> None:
         await finalize_response(message, thinking_msg, response, user_text)
         return
     
-    # Если сообщение явно для генерации ("нарисуй...")
-    generate_keywords = ["нарисуй", "сгенерируй", "сделай картинку", "покажи", "изобрази", "картинку"]
-    is_explicit_generate = any(keyword in user_text.lower() for keyword in generate_keywords)
-    
-    # Если не похоже ни на одно из двух — лучше спросить
-    if not is_explicit_generate and len(user_text) < 10:
-        return
-    
-    # ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ
+    # Генерация изображения
     can, remaining = can_generate_image(message.from_user.id)
     if not can:
         await message.answer(
@@ -612,10 +589,8 @@ async def handle_text_for_generate(message: Message) -> None:
         )
         return
     
-    # Увеличиваем счетчик
     increment_generate_count(message.from_user.id)
     
-    # Отправляем сообщение о начале генерации
     waiting_msg = await message.answer(
         f"🎨 Генерирую изображение по запросу: **{user_text[:50]}**...\n\n"
         f"⏱ Обычно 15-30 секунд\n"
@@ -623,7 +598,6 @@ async def handle_text_for_generate(message: Message) -> None:
         parse_mode="Markdown"
     )
     
-    # Генерация
     image_bytes = await generate_image(user_text)
     
     if image_bytes:
@@ -635,7 +609,6 @@ async def handle_text_for_generate(message: Message) -> None:
             parse_mode="Markdown"
         )
     else:
-        # Возвращаем лимит обратно при ошибке
         decrement_generate_count(message.from_user.id)
         await message.answer(
             "❌ **Не удалось сгенерировать изображение**\n\n"
@@ -653,7 +626,6 @@ async def handle_text_for_generate(message: Message) -> None:
 # ======================== ОБРАБОТЧИКИ ОТВЕТОВ И КОЛБЭКОВ ========================
 @dp.message(F.reply_to_message)
 async def handle_reply_to_bot(message: Message) -> None:
-    """Если пользователь ответил на сообщение бота"""
     if not message.reply_to_message or message.reply_to_message.from_user.id != bot.id:
         return
     
@@ -664,7 +636,6 @@ async def handle_reply_to_bot(message: Message) -> None:
     if len(user_text) < 3:
         return
     
-    # Отвечаем в GPT режиме
     add_user(message.from_user.id, message.from_user.username)
     can, wait = check_rate_limit(message.from_user.id)
     if not can:
@@ -756,8 +727,6 @@ async def cmd_admin(message: Message) -> None:
 
 
 # ======================== ЗАПУСК БОТА ========================
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
