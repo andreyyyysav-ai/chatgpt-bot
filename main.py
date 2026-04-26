@@ -7,6 +7,7 @@ import time
 from asyncio import Lock
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from collections import defaultdict
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -14,6 +15,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 
+# ======================== КОНФИГУРАЦИЯ ========================
 BOT_TOKEN = "8644894856:AAGRX-aggF3oc6shx6QGhFYACf00S4mddXE"
 GROQ_API_KEYS = [
     "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",
@@ -21,6 +23,10 @@ GROQ_API_KEYS = [
     "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",
 ]
 ADMIN_ID = 6689292068
+
+# Hugging Face токен для генерации изображений
+HF_API_TOKEN = "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"
+HF_API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev"
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден")
@@ -62,7 +68,11 @@ MEMORY_TRIGGER_PATTERNS = ("запомни ", "запомни:", "remember ", "r
 key_lock = Lock()
 current_key_index = 0
 
+# Хранилище лимитов генерации изображений (в памяти)
+generate_limits = {}
 
+
+# ======================== ФУНКЦИИ РАБОТЫ С ДАННЫМИ ========================
 def load_data() -> Dict:
     if not os.path.exists(DATA_FILE):
         with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -206,6 +216,97 @@ def check_rate_limit(user_id: int) -> Tuple[bool, int]:
     return False, wait
 
 
+# ======================== ФУНКЦИИ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЙ ========================
+def can_generate_image(user_id: int) -> Tuple[bool, int]:
+    """
+    Проверка лимита генерации: 10 изображений в день на пользователя
+    Возвращает (можно_ли, остаток_до_лимита)
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    if user_id not in generate_limits:
+        generate_limits[user_id] = {"date": today, "count": 0}
+        return True, 10
+    
+    user_limit = generate_limits[user_id]
+    
+    # Если день изменился — сбрасываем счетчик
+    if user_limit["date"] != today:
+        user_limit["date"] = today
+        user_limit["count"] = 0
+        return True, 10
+    
+    used = user_limit["count"]
+    if used >= 10:
+        return False, 0
+    
+    return True, 10 - used
+
+
+def increment_generate_count(user_id: int) -> None:
+    """Увеличить счетчик генераций для пользователя"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    if user_id not in generate_limits:
+        generate_limits[user_id] = {"date": today, "count": 1}
+        return
+    
+    user_limit = generate_limits[user_id]
+    if user_limit["date"] == today:
+        user_limit["count"] += 1
+    else:
+        user_limit["date"] = today
+        user_limit["count"] = 1
+
+
+def decrement_generate_count(user_id: int) -> None:
+    """Уменьшить счетчик (при ошибке генерации)"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    if user_id in generate_limits:
+        user_limit = generate_limits[user_id]
+        if user_limit["date"] == today and user_limit["count"] > 0:
+            user_limit["count"] -= 1
+
+
+async def generate_image(prompt: str) -> Optional[bytes]:
+    """
+    Генерация изображения через Hugging Face API
+    Возвращает bytes картинки или None при ошибке
+    """
+    headers = {
+        "Authorization": f"Bearer {HF_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {"inputs": prompt}
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(
+                HF_API_URL, 
+                headers=headers, 
+                json=payload, 
+                timeout=aiohttp.ClientTimeout(total=90)
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.read()
+                elif resp.status == 503:
+                    # Модель загружается — это нормально при первом запуске
+                    error_text = await resp.text()
+                    logging.warning(f"HF модель загружается: {error_text[:100]}")
+                    return None
+                else:
+                    logging.error(f"HF ошибка {resp.status}")
+                    return None
+        except asyncio.TimeoutError:
+            logging.error("Таймаут генерации изображения")
+            return None
+        except Exception as e:
+            logging.error(f"Ошибка генерации: {e}")
+            return None
+
+
+# ======================== ФУНКЦИИ GPT ========================
 async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None) -> str:
     global current_key_index
 
@@ -267,46 +368,20 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None) ->
     return "Сейчас большая нагрузка, попробуй чуть позже 😊"
 
 
+# ======================== КЛАВИАТУРЫ ========================
 def get_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
             [InlineKeyboardButton(text="🏆 Топ участников", callback_data="top")],
+            [InlineKeyboardButton(text="🎨 Помощь по генерации", callback_data="draw_help")],
             [InlineKeyboardButton(text="🗑 Очистить память", callback_data="clear_memory")],
             [InlineKeyboardButton(text="❓ Помощь", callback_data="help")],
         ]
     )
 
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-HELP_TEXT = """
-📚 ChatGPT Bot - инструкция
-
-💬 В личных сообщениях:
-Просто напиши любое сообщение
-
-👥 В группах:
-Напиши /ask вопрос или ответь на сообщение бота
-
-🧠 Мои возможности:
-- Помню последние 50 сообщений в чате
-- Запоминаю важную информацию по команде "запомни ..."
-- Полностью бесплатен, 10 секунд ожидания между запросами
-- Канал: https://t.me/PRMDevStudio
-
-📋 Команды:
-/start - приветствие и меню
-/help - это сообщение
-/menu - показать меню
-/clear_memory - очистить память
-/stats - статистика группы
-/top - топ активных участников
-"""
-
-
+# ======================== ОБРАБОТЧИКИ КОМАНД ========================
 async def finalize_response(message: Message, thinking_msg: Message, response: str, source_text: str) -> None:
     add_to_context(message.chat.id, "assistant", response)
     await thinking_msg.delete()
@@ -326,8 +401,12 @@ async def cmd_start(message: Message) -> None:
         f"👋 Привет, {message.from_user.first_name}!\n\n"
         "Я ChatGPT. Полностью бесплатен и готов помочь.\n"
         "Канал: https://t.me/PRMDevStudio\n\n"
+        "**Также я умею генерировать изображения!**\n"
+        "Просто напиши любое описание (например, `кот в космосе`) и я создам картинку.\n"
+        "Лимит: 10 изображений в день на человека.\n\n"
         "Просто напиши мне сообщение или выбери действие ниже:",
         reply_markup=get_main_keyboard(),
+        parse_mode="Markdown"
     )
 
 
@@ -338,7 +417,57 @@ async def cmd_menu(message: Message) -> None:
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    await message.answer(HELP_TEXT)
+    help_text = """
+📚 **ChatGPT Bot - инструкция**
+
+💬 **В личных сообщениях:**
+- Просто напиши любое сообщение - я отвечу как GPT
+- Или напиши описание для генерации картинки
+
+🎨 **Генерация изображений:**
+- Просто напиши текстовое описание (например: `кот в космосе`)
+- Команда `/draw` покажет подробную инструкцию
+- **Лимит: 10 картинок в день на человека**
+
+👥 **В группах:**
+- Напиши `/ask вопрос` или ответь на сообщение бота
+
+🧠 **Мои возможности:**
+- Помню последние 50 сообщений в чате
+- Запоминаю важную информацию по команде "запомни ..."
+- Полностью бесплатен, 10 секунд ожидания между запросами
+
+📋 **Команды:**
+/start - приветствие и меню
+/help - это сообщение
+/menu - показать меню
+/draw - инструкция по генерации картинок
+/clear_memory - очистить память
+/stats - статистика группы
+/top - топ активных участников
+"""
+    await message.answer(help_text, parse_mode="Markdown")
+
+
+@dp.message(Command("draw"))
+async def cmd_draw_help(message: Message) -> None:
+    """Команда /draw — показывает инструкцию по генерации изображений"""
+    # Проверяем остаток лимита
+    can, remaining = can_generate_image(message.from_user.id)
+    
+    await message.answer(
+        f"🎨 **Как генерировать изображения**\n\n"
+        f"1️⃣ Просто напиши **любое текстовое сообщение** в этом чате\n"
+        f"2️⃣ Я автоматически пойму, что нужно сгенерировать картинку 🤖\n\n"
+        f"**Примеры:**\n"
+        f"• `кот в космосе`\n"
+        f"• `cyberpunk city, neon lights`\n"
+        f"• `красивый закат над морем`\n\n"
+        f"✨ **Совершенно бесплатно!**\n"
+        f"📊 **Лимит:** {remaining}/10 изображений осталось на сегодня\n\n"
+        f"💡 Просто отправь текстовый запрос — и я сразу начну генерацию!",
+        parse_mode="Markdown"
+    )
 
 
 @dp.message(Command("clear_memory"))
@@ -423,49 +552,133 @@ async def cmd_ask(message: Message) -> None:
     await finalize_response(message, thinking_msg, response, query)
 
 
+# ======================== ОСНОВНОЙ ОБРАБОТЧИК ГЕНЕРАЦИИ КАРТИНОК ========================
+@dp.message(F.text & ~F.text.startswith("/"))
+async def handle_text_for_generate(message: Message) -> None:
+    """
+    Обработка текстовых сообщений для генерации изображений
+    Логика: в ЛС текст отправляется на генерацию картинки
+    """
+    # Только в личных сообщениях (в группах через /ask)
+    if message.chat.type != "private":
+        return
+    
+    user_text = message.text.strip()
+    
+    # Игнорируем слишком короткие сообщения
+    if len(user_text) < 3:
+        return
+    
+    # Проверяем, не хочет ли пользователь пообщаться с GPT
+    gpt_keywords = ["?" , "что такое", "как сделать", "расскажи", "объясни", "почему", 
+                    "кто такой", "где найти", "сколько", "когда", "зачем", "помоги", 
+                    "привет", "здравствуй", "как дела"]
+    
+    is_gpt_question = any(keyword in user_text.lower() for keyword in gpt_keywords)
+    
+    # Если явно спрашивает — отправляем в GPT
+    if is_gpt_question and len(user_text) > 5:
+        # Отправляем в GPT
+        add_user(message.from_user.id, message.from_user.username)
+        can, wait = check_rate_limit(message.from_user.id)
+        if not can:
+            await message.answer(f"⏱ Подожди {wait} секунд.")
+            return
+        
+        update_user_stats(message.from_user.id)
+        add_to_context(message.chat.id, "user", user_text, message.from_user.first_name)
+        thinking_msg = await message.answer("🤔 Думаю...")
+        response = await ask_groq(user_text, message.chat.id, message.from_user.first_name)
+        await finalize_response(message, thinking_msg, response, user_text)
+        return
+    
+    # Если сообщение явно для генерации ("нарисуй...")
+    generate_keywords = ["нарисуй", "сгенерируй", "сделай картинку", "покажи", "изобрази", "картинку"]
+    is_explicit_generate = any(keyword in user_text.lower() for keyword in generate_keywords)
+    
+    # Если не похоже ни на одно из двух — лучше спросить
+    if not is_explicit_generate and len(user_text) < 10:
+        return
+    
+    # ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ
+    can, remaining = can_generate_image(message.from_user.id)
+    if not can:
+        await message.answer(
+            f"⏰ **Лимит исчерпан!**\n\n"
+            f"Ты использовал все 10 генераций на сегодня.\n"
+            f"Возвращайся завтра! 🌙\n\n"
+            f"А пока могу ответить на вопросы как GPT — просто спроси!",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Увеличиваем счетчик
+    increment_generate_count(message.from_user.id)
+    
+    # Отправляем сообщение о начале генерации
+    waiting_msg = await message.answer(
+        f"🎨 Генерирую изображение по запросу: **{user_text[:50]}**...\n\n"
+        f"⏱ Обычно 15-30 секунд\n"
+        f"📊 Осталось генераций сегодня: {remaining - 1}/10",
+        parse_mode="Markdown"
+    )
+    
+    # Генерация
+    image_bytes = await generate_image(user_text)
+    
+    if image_bytes:
+        await message.answer_photo(
+            photo=image_bytes,
+            caption=f"🖼 **Запрос:** {user_text[:200]}\n\n"
+                   f"✨ Сгенерировано через Hugging Face FLUX\n"
+                   f"📊 Осталось генераций сегодня: {remaining - 1}/10",
+            parse_mode="Markdown"
+        )
+    else:
+        # Возвращаем лимит обратно при ошибке
+        decrement_generate_count(message.from_user.id)
+        await message.answer(
+            "❌ **Не удалось сгенерировать изображение**\n\n"
+            "**Возможные причины:**\n"
+            "• Модель загружается (попробуй через 30 секунд)\n"
+            "• Слишком сложный запрос\n"
+            "• Технические проблемы\n\n"
+            "🔄 Попробуй другой запрос или повтори позже.",
+            parse_mode="Markdown"
+        )
+    
+    await waiting_msg.delete()
+
+
+# ======================== ОБРАБОТЧИКИ ОТВЕТОВ И КОЛБЭКОВ ========================
 @dp.message(F.reply_to_message)
-async def handle_reply(message: Message) -> None:
+async def handle_reply_to_bot(message: Message) -> None:
+    """Если пользователь ответил на сообщение бота"""
     if not message.reply_to_message or message.reply_to_message.from_user.id != bot.id:
         return
-    if not message.text:
+    
+    if not message.text or message.text.startswith("/"):
         return
-
+    
+    user_text = message.text.strip()
+    if len(user_text) < 3:
+        return
+    
+    # Отвечаем в GPT режиме
     add_user(message.from_user.id, message.from_user.username)
     can, wait = check_rate_limit(message.from_user.id)
     if not can:
         await message.answer(f"⏱ Подожди {wait} секунд.")
         return
-
+    
     update_user_stats(message.from_user.id)
     if message.chat.type != "private":
         update_stats(message.chat.id, message.from_user.id)
-
-    add_to_context(message.chat.id, "user", message.text, message.from_user.first_name)
+    
+    add_to_context(message.chat.id, "user", user_text, message.from_user.first_name)
     thinking_msg = await message.answer("🤔 Думаю...")
-    response = await ask_groq(message.text, message.chat.id, message.from_user.first_name)
-    await finalize_response(message, thinking_msg, response, message.text)
-
-
-@dp.message()
-async def handle_private(message: Message) -> None:
-    if message.chat.type != "private":
-        return
-    if message.text and message.text.startswith("/"):
-        return
-    if not message.text:
-        return
-
-    add_user(message.from_user.id, message.from_user.username)
-    can, wait = check_rate_limit(message.from_user.id)
-    if not can:
-        await message.answer(f"⏱ Подожди {wait} секунд.")
-        return
-
-    update_user_stats(message.from_user.id)
-    add_to_context(message.chat.id, "user", message.text, message.from_user.first_name)
-    thinking_msg = await message.answer("🤔 Думаю...")
-    response = await ask_groq(message.text, message.chat.id, message.from_user.first_name)
-    await finalize_response(message, thinking_msg, response, message.text)
+    response = await ask_groq(user_text, message.chat.id, message.from_user.first_name)
+    await finalize_response(message, thinking_msg, response, user_text)
 
 
 @dp.callback_query()
@@ -493,8 +706,32 @@ async def handle_callback(callback: CallbackQuery) -> None:
         return
 
     if callback.data == "help":
-        await callback.message.edit_text(HELP_TEXT)
+        await callback.message.edit_text(
+            "📚 **Помощь**\n\n"
+            "• Задай любой вопрос — отвечу как GPT\n"
+            "• Напиши описание — сгенерирую картинку (10/день)\n"
+            "• /draw — инструкция по генерации\n\n"
+            "Канал: https://t.me/PRMDevStudio",
+            parse_mode="Markdown"
+        )
         await callback.answer()
+        return
+    
+    if callback.data == "draw_help":
+        can, remaining = can_generate_image(callback.from_user.id)
+        await callback.message.edit_text(
+            f"🎨 **Как генерировать изображения**\n\n"
+            f"Просто напиши мне в личные сообщения любое описание!\n\n"
+            f"**Примеры:**\n"
+            f"• `кот в космосе`\n"
+            f"• `cyberpunk city`\n"
+            f"• `красивый закат`\n\n"
+            f"✨ **Бесплатно!**\n"
+            f"📊 Осталось сегодня: **{remaining}/10**",
+            parse_mode="Markdown"
+        )
+        await callback.answer()
+        return
 
 
 @dp.message(Command("admin"))
@@ -518,12 +755,19 @@ async def cmd_admin(message: Message) -> None:
     )
 
 
+# ======================== ЗАПУСК БОТА ========================
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+
 async def main() -> None:
     load_data()
 
     print("=" * 50)
     print("🤖 ChatGPT Bot запущен!")
     print("💸 Полностью бесплатен")
+    print("🎨 Генерация изображений: Hugging Face (10/день на пользователя)")
     print("📢 Канал: https://t.me/PRMDevStudio")
     print(f"🛠 Admin ID: {ADMIN_ID}")
     print(f"🔑 Ключей Groq: {len(GROQ_API_KEYS)}")
