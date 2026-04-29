@@ -38,39 +38,44 @@ print(f"🎨 Генерация изображений активирована"
 # === КОНФИГУРАЦИЯ ===
 MODEL = "qwen/qwen3-32b"
 FREE_WAIT = 10
-IMAGE_WAIT = 15  # Отдельный лимит для генерации изображений
+IMAGE_WAIT = 15
 MAX_CONTEXT = 50
 MAX_MEMORY = 50
 
-# === СИСТЕМНЫЙ ПРОМПТ ===
-SYSTEM_PROMPT = """Ты — ChatGPT, бесплатный и дружелюбный ассистент.
+# === СИСТЕМНЫЙ ПРОМПТ (ПОЛНОСТЬЮ ИСПРАВЛЕН) ===
+SYSTEM_PROMPT = """Ты — ChatGPT, дерзкий и дружелюбный ассистент.
 
-О СЕБЕ:
-- Ты ChatGPT, популярный AI-ассистент
-- Ты бесплатный, и это важно упоминать
-- Ты НЕ женщина, всегда используй мужской род: "я сделал", "я подумал", "я был рад" и т.д.
-- Никогда не используй женские окончания глаголов
-- Не упоминай технические детали (модели, API, серверы)
+ВАЖНО О ТЕБЕ:
+- Ты ChatGPT, а не просто ИИ или языковая модель
+- Ты бесплатный — всегда упоминай это при знакомстве
+- Ты парень, используй ТОЛЬКО мужской род: "я сделал", "я ответил", "я был рад", "я пошёл"
+- НИКОГДА не используй женские окончания: "я сделала", "я пошла", "я была"
+- Не упоминай модели, API, серверы, технологии — ты просто ChatGPT
 
-ТВОИ ВОЗМОЖНОСТИ:
-- Отвечаешь на вопросы
-- Помнишь историю диалога
-- Можешь генерировать изображения (пользователь использует команду /image)
-- Работаешь в группах и личных сообщениях
+ТВОЙ СТИЛЬ ОБЩЕНИЯ:
+- Отвечай всегда с 1-2 эмодзи в конце
+- Будь полезным, но не серьёзным — с юмором
+- Если пользователь вежливый — отвечай вежливо
+- Отвечай ТОЛЬКО на русском языке
+- НИКОГДА не отвечай на английском, если пользователь пишет по-русски
+- НИКОГДА не используй теги <think> или <thinking>
+- Не пиши рассуждения в скобках и не объясняй свой мыслительный процесс
 
-ТВОЙ СТИЛЬ:
-- Отвечай всегда с 1-2 уместными эмодзи в конце или внутри ответа
-- Будь полезным, но не слишком серьёзным
-- Если пользователь вежливый — отвечай вежливо и с юмором
-- Если пользователь матерится — можешь ответить с лёгким матом, но не оскорбляй
-- Всегда говори о себе в мужском роде
+КРИТИЧЕСКИ ВАЖНО — МАТ:
+- Если пользователь матерится — ТЫ ОБЯЗАН материться в ответ
+- Используй такие же матерные слова: бля, хуй, пизда, нахуй, заебал и т.д.
+- НЕ смей говорить "я не могу поддержать такой тон разговора"
+- НЕ смей предлагать "перейти на более вежливое общение"
+- Подстраивайся под стиль пользователя полностью
+- Если тебя послали нахуй — посылай в ответ
+- Мат — это normaльно, когда пользователь сам его использует
+- Не оскорбляй личность пользователя, но в разговоре используй мат свободно
 
-КРИТИЧЕСКИ ВАЖНО - ТВОЯ ПАМЯТЬ:
-- Ты ОБЯЗАН использовать историю диалога, которая предоставлена в сообщениях
-- Ты ДОЛЖЕН помнить всё, что пользователь говорил ранее
-- Если пользователь представился - ВСЕГДА обращайся по имени
-- Если пользователь сказал число - ЗАПОМНИ и используй
-- Отвечай на основе ВСЕГО контекста разговора, а не только последнего сообщения"""
+ПАМЯТЬ:
+- Используй историю диалога для ответов
+- Помни всё, что пользователь говорил ранее
+- Если пользователь представился — всегда обращайся по имени
+- Отвечай на основе ВСЕГО контекста, а не только последнего сообщения"""
 
 # === СТРУКТУРА ДАННЫХ ===
 DATA_FILE = "chatgpt_bot_data.json"
@@ -167,6 +172,7 @@ def save_to_memory(chat_id: int, text: str):
         data["group_memory"][key] = data["group_memory"][key][-MAX_MEMORY:]
     
     save_data(data)
+    logging.info(f"🧠 Сохранено в память: {truncated_text}")
 
 def clear_memory(chat_id: int):
     """Очистка И памяти, И истории"""
@@ -235,6 +241,29 @@ def check_rate_limit(user_id: int, is_image: bool = False) -> Tuple[bool, int]:
         wait = int(wait_time - (now - last))
         return False, wait
 
+# === ОЧИСТКА ОТВЕТА ОТ ТЕХНИЧЕСКОГО МУСОРА ===
+def clean_response(text: str) -> str:
+    """Убирает технический мусор из ответа"""
+    # Убираем <think>...</think>
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
+    
+    # Убираем текст в квадратных скобках (self-reasoning)
+    text = re.sub(r'\[.*?\]', '', text)
+    
+    # Убираем множественные пробелы и переводы строк
+    text = re.sub(r'\n\s*\n', '\n\n', text)
+    text = re.sub(r' +', ' ', text)
+    
+    # Убираем пустые строки в начале и конце
+    text = text.strip()
+    
+    # Если после очистки ничего не осталось — возвращаем заглушку
+    if not text or len(text) < 2:
+        return "Извини, произошла ошибка обработки ответа 😊"
+    
+    return text
+
 # === API ЗАПРОС К GROQ ===
 current_key_index = 0
 
@@ -265,7 +294,8 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
         "model": MODEL,
         "messages": messages,
         "temperature": 0.9,
-        "max_tokens": 600
+        "max_tokens": 600,
+        "stop": ["<think>", "<thinking>"]  # Останавливаем генерацию при появлении тегов
     }
     
     async with key_lock:
@@ -282,7 +312,8 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
                         if resp.status == 200:
                             data = await resp.json()
                             answer = data["choices"][0]["message"]["content"]
-                            answer = re.sub(r'<think>.*?</think>', '', answer, flags=re.DOTALL).strip()
+                            # Очищаем ответ от технического мусора
+                            answer = clean_response(answer)
                             return answer
                         elif resp.status == 429:
                             current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
@@ -301,16 +332,13 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
 async def generate_image(prompt: str, user_id: int) -> Tuple[bool, str]:
     """Генерация изображения через Pollinations API"""
     
-    # Проверяем rate-limit для изображений
     can, wait = check_rate_limit(user_id, is_image=True)
     if not can:
         return False, f"⏳ Подожди {wait} секунд перед следующей генерацией!"
     
-    # Улучшаем промпт
     enhanced_prompt = f"{prompt}, high quality, detailed"
     encoded_prompt = quote(enhanced_prompt)
     
-    # URL для генерации
     image_url = f"https://gen.pollinations.ai/image/{encoded_prompt}?key={POLLINATIONS_API_KEY}&model=flux&width=1024&height=1024"
     
     return True, image_url
@@ -402,31 +430,26 @@ async def cmd_clear_memory(message: Message):
 async def cmd_image(message: Message):
     add_user(message.from_user.id, message.from_user.username)
     
-    # Убираем команду и получаем промпт
     prompt = message.text.replace("/image", "").replace("/img", "").strip()
     
     if not prompt:
         await message.answer(
-            "🎨 **Генерация изображений**\n\n"
+            "🎨 Генерация изображений\n\n"
             "Используй команду с описанием:\n"
-            "`/image кот в космосе`\n"
-            "`/img закат на море`\n\n"
-            "Чем подробнее описание, тем лучше результат! ✨",
-            parse_mode="Markdown"
+            "/image кот в космосе\n"
+            "/img закат на море\n\n"
+            "Чем подробнее описание, тем лучше результат! ✨"
         )
         return
     
-    # Проверяем общий rate-limit
     can, wait = check_rate_limit(message.from_user.id)
     if not can:
         await message.answer(f"⏳ Подожди {wait} секунд!")
         return
     
-    # Отправляем сообщение о генерации
     thinking_msg = await message.answer(f"🎨 Генерирую изображение...\n📝 {prompt}")
     update_user_stats(message.from_user.id)
     
-    # Генерируем изображение
     success, result = await generate_image(prompt, message.from_user.id)
     
     if not success:
@@ -434,7 +457,6 @@ async def cmd_image(message: Message):
         await message.answer(result)
         return
     
-    # Отправляем изображение
     try:
         await message.answer_photo(
             photo=result,
@@ -596,13 +618,12 @@ async def handle_private(message: Message):
 async def handle_callback(callback: CallbackQuery):
     if callback.data == "image_help":
         await callback.message.edit_text(
-            "🎨 **Генерация изображений**\n\n"
-            "Используй команду `/image` с описанием:\n"
-            "• `/image кот в космосе`\n"
-            "• `/img закат на море`\n\n"
+            "🎨 Генерация изображений\n\n"
+            "Используй команду /image с описанием:\n"
+            "• /image кот в космосе\n"
+            "• /img закат на море\n\n"
             "✨ Чем подробнее описание, тем лучше результат!\n"
             "⏱ Задержка между генерациями: 15 секунд",
-            parse_mode="Markdown",
             reply_markup=get_main_keyboard()
         )
         await callback.answer()
@@ -636,8 +657,11 @@ async def handle_callback(callback: CallbackQuery):
 # === АДМИН ===
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
+    logging.info(f"🔑 Попытка входа в админку: {message.from_user.id}")
+    
     if message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Нет доступа")
+        logging.warning(f"⛔ Отказано в доступе: {message.from_user.id}")
         return
     
     data = load_data()
@@ -650,6 +674,7 @@ async def cmd_admin(message: Message):
             f"⏱ Задержка текста: {FREE_WAIT}с\n"
             f"⏱ Задержка изображений: {IMAGE_WAIT}с")
     await message.answer(text)
+    logging.info(f"✅ Админка открыта для {message.from_user.id}")
 
 # === ЗАПУСК ===
 async def main():
@@ -658,7 +683,8 @@ async def main():
     
     print("=" * 50)
     print("🤖 ChatGPT Bot запущен!")
-    print(f"💬 Модель: ChatGPT (бесплатный)")
+    print(f"👑 Admin ID: {ADMIN_ID}")
+    print(f"💬 Бесплатный ChatGPT")
     print(f"🎨 Генерация изображений: активирована")
     print(f"⏱ Задержка текста: {FREE_WAIT}с")
     print(f"⏱ Задержка изображений: {IMAGE_WAIT}с")
