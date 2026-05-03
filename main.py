@@ -17,8 +17,6 @@ from asyncio import Lock
 # === ТВОИ КЛЮЧИ ===
 BOT_TOKEN = "8644894856:AAGRX-aggF3oc6shx6QGhFYACf00S4mddXE"
 POLLINATIONS_API_KEY = "sk_1SyVl5uOEUAvt7jYgGtUP40uFOaABdCP"
-
-# Только один ключ
 GROQ_API_KEY = "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"
 
 ADMIN_ID = 6689292068
@@ -89,12 +87,12 @@ DATA_STRUCTURE = {
 key_lock = Lock()
 
 def load_data() -> Dict:
-    if not os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(DATA_STRUCTURE, f, ensure_ascii=False, indent=2)
-        return DATA_STRUCTURE.copy()
-    
     try:
+        if not os.path.exists(DATA_FILE):
+            with open(DATA_FILE, 'w', encoding='utf-8') as f:
+                json.dump(DATA_STRUCTURE, f, ensure_ascii=False, indent=2)
+            return DATA_STRUCTURE.copy()
+        
         with open(DATA_FILE, 'r', encoding='utf-8-sig') as f:
             data = json.load(f)
         
@@ -103,7 +101,8 @@ def load_data() -> Dict:
                 data[key] = DATA_STRUCTURE[key].copy()
         
         return data
-    except:
+    except Exception as e:
+        logging.error(f"❌ Ошибка загрузки данных (50): {e}")
         return DATA_STRUCTURE.copy()
 
 def save_data(data: Dict):
@@ -111,7 +110,7 @@ def save_data(data: Dict):
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        logging.error(f"❌ Ошибка сохранения данных: {e}")
+        logging.error(f"❌ Ошибка сохранения данных (51): {e}")
 
 # === ПАМЯТЬ И ИСТОРИЯ ===
 def get_context(chat_id: int) -> List[Dict]:
@@ -262,14 +261,14 @@ async def safe_edit_text(message: Message, text: str, reply_markup=None):
         if "message is not modified" not in str(e):
             logging.error(f"❌ Ошибка редактирования: {e}")
 
-# === API ЗАПРОС К GROQ ===
+# === API ЗАПРОС К GROQ (С КОДАМИ ОШИБОК) ===
 async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is_group: bool = False) -> str:
     context = get_context(chat_id)
     memory = get_memory(chat_id)
     
     system_prompt = SYSTEM_PROMPT
     if memory:
-        system_prompt += f"\n\n=== ВАЖНАЯ ИНФОРМАЦИЯ (я это запомнил) ===\n{memory}\n=========================================="
+        system_prompt += f"\n\n=== ВАЖНАЯ ИНФОРМАЦИЯ ===\n{memory}\n==========================="
     
     messages = [{"role": "system", "content": system_prompt}]
     
@@ -300,16 +299,54 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    answer = data["choices"][0]["message"]["content"]
-                    return clean_response(answer)
+                status = resp.status
+                
+                if status == 200:
+                    try:
+                        data = await resp.json()
+                        answer = data["choices"][0]["message"]["content"]
+                        return clean_response(answer)
+                    except Exception as e:
+                        logging.error(f"❌ Ошибка парсинга ответа (22): {e}")
+                        return "⚠️ Ошибка обработки ответа (22) 😊"
+                        
+                elif status == 429:
+                    logging.warning(f"⚠️ Rate limit (10)")
+                    return "⚠️ Слишком много запросов (10) 😊"
+                    
+                elif status == 401:
+                    logging.error(f"❌ Неверный ключ (13)")
+                    return "⚠️ Ошибка авторизации (13) 😊"
+                    
+                elif status == 403:
+                    logging.error(f"❌ Ключ заблокирован (12)")
+                    return "⚠️ Ключ заблокирован (12) 😊"
+                    
+                elif status == 413:
+                    logging.error(f"❌ Запрос слишком большой (11)")
+                    return "⚠️ Запрос слишком большой (11) 😊"
+                    
+                elif status >= 500:
+                    logging.error(f"❌ Ошибка сервера Groq (14-{status})")
+                    return f"⚠️ Ошибка сервера (14-{status}) 😊"
+                    
                 else:
-                    return "⚠️ Сейчас большая нагрузка, попробуй через минуту 😊"
-    except:
-        return "⚠️ Сейчас большая нагрузка, попробуй через минуту 😊"
+                    logging.error(f"❌ Ошибка API (14-{status})")
+                    return f"⚠️ Ошибка API (14-{status}) 😊"
+                    
+    except asyncio.TimeoutError:
+        logging.error(f"⏱ Таймаут запроса (20)")
+        return "⚠️ Таймаут запроса (20) 😊"
+        
+    except aiohttp.ClientConnectionError:
+        logging.error(f"🌐 Ошибка сети (21)")
+        return "⚠️ Ошибка сети (21) 😊"
+        
+    except Exception as e:
+        logging.error(f"❌ Неизвестная ошибка (99): {e}")
+        return "⚠️ Ошибка (99) 😊"
 
-# === РАСПОЗНАВАНИЕ ФОТО ===
+# === РАСПОЗНАВАНИЕ ФОТО (С КОДАМИ ОШИБОК) ===
 async def describe_photo(photo_url: str, question: str = "Что на этом фото? Опиши подробно") -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
     
@@ -336,20 +373,39 @@ async def describe_photo(photo_url: str, question: str = "Что на этом �
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    answer = data["choices"][0]["message"]["content"]
-                    return clean_response(answer)
+                status = resp.status
+                
+                if status == 200:
+                    try:
+                        data = await resp.json()
+                        answer = data["choices"][0]["message"]["content"]
+                        return clean_response(answer)
+                    except:
+                        return "👁️ Ошибка обработки фото (30) 😔"
+                        
+                elif status == 429:
+                    return "👁️ Слишком много запросов (30-10) 😔"
+                    
+                elif status == 413:
+                    return "👁️ Фото слишком большое (31) 😔"
+                    
+                elif status == 415:
+                    return "👁️ Формат не поддерживается (32) 😔"
+                    
                 else:
-                    return "Не удалось распознать фото 😔"
+                    return f"👁️ Ошибка распознавания (30-{status}) 😔"
+                    
+    except asyncio.TimeoutError:
+        return "👁️ Таймаут распознавания (30-20) 😔"
+        
     except:
-        return "Не удалось распознать фото 😔"
+        return "👁️ Ошибка распознавания (30-99) 😔"
 
-# === ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ===
+# === ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (С КОДАМИ ОШИБОК) ===
 async def generate_image(prompt: str, user_id: int) -> Tuple[bool, str]:
     can, wait = check_rate_limit(user_id, is_image=True)
     if not can:
-        return False, f"⏳ Подожди {wait} секунд перед следующей генерацией!"
+        return False, f"⏳ Подожди {wait} сек (40-0)"
     
     enhanced_prompt = f"{prompt}, high quality, detailed, realistic"
     encoded_prompt = quote(enhanced_prompt)
@@ -360,18 +416,44 @@ async def generate_image(prompt: str, user_id: int) -> Tuple[bool, str]:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.head(image_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status == 200:
+                    status = resp.status
+                    
+                    if status == 200:
                         return True, image_url
+                        
+                    elif status == 429:
+                        logging.warning(f"⚠️ Pollinations rate limit (40-10)")
+                        if attempt < MAX_IMAGE_RETRIES - 1:
+                            await asyncio.sleep(3)
+                            continue
+                        return False, "⚠️ Сервер перегружен (40-10) 😊"
+                        
+                    elif status >= 500:
+                        logging.error(f"❌ Сервер Pollinations недоступен (41-{status})")
+                        if attempt < MAX_IMAGE_RETRIES - 1:
+                            await asyncio.sleep(2)
+                            continue
+                        return False, "⚠️ Сервер недоступен (41) 😊"
+                        
                     else:
                         if attempt < MAX_IMAGE_RETRIES - 1:
                             await asyncio.sleep(2)
-                        continue
-        except:
+                            continue
+                        return False, f"⚠️ Ошибка генерации (40-{status}) 😊"
+                        
+        except asyncio.TimeoutError:
+            if attempt < MAX_IMAGE_RETRIES - 1:
+                continue
+            return False, "⚠️ Таймаут генерации (40-20) 😊"
+            
+        except Exception as e:
+            logging.error(f"❌ Ошибка сети при генерации (40-21): {e}")
             if attempt < MAX_IMAGE_RETRIES - 1:
                 await asyncio.sleep(2)
-            continue
+                continue
+            return False, "⚠️ Ошибка сети (40-21) 😊"
     
-    return False, "⚠️ Сервер генерации перегружен. Лимит не списан, попробуй позже 😊"
+    return False, "⚠️ Не удалось сгенерировать (40-99) 😊"
 
 # === КЛАВИАТУРА ===
 def get_main_keyboard():
@@ -490,7 +572,7 @@ async def cmd_image(message: Message):
         await thinking_msg.delete()
     except:
         await thinking_msg.delete()
-        await message.answer("⚠️ Не удалось загрузить изображение. Лимит не списан, попробуй другой запрос 😊")
+        await message.answer("⚠️ Не удалось загрузить (40-22) 😊")
 
 # === РАСПОЗНАВАНИЕ ФОТО ===
 @dp.message(F.photo)
@@ -505,18 +587,23 @@ async def handle_photo(message: Message):
     thinking_msg = await message.answer("👁️ Смотрю на фото...")
     update_user_stats(message.from_user.id)
     
-    photo = message.photo[-1]
-    file_info = await bot.get_file(photo.file_id)
-    photo_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
-    
-    question = "Что на этом фото? Опиши подробно на русском языке"
-    if message.caption:
-        question = f"{message.caption}. Опиши подробно на русском языке"
-    
-    description = await describe_photo(photo_url, question)
-    
-    await thinking_msg.delete()
-    await message.reply(f"👁️ {description}")
+    try:
+        photo = message.photo[-1]
+        file_info = await bot.get_file(photo.file_id)
+        photo_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+        
+        question = "Что на этом фото? Опиши подробно на русском языке"
+        if message.caption:
+            question = f"{message.caption}. Опиши подробно на русском языке"
+        
+        description = await describe_photo(photo_url, question)
+        
+        await thinking_msg.delete()
+        await message.reply(f"👁️ {description}")
+    except Exception as e:
+        await thinking_msg.delete()
+        logging.error(f"❌ Ошибка получения фото (33): {e}")
+        await message.reply("👁️ Ошибка получения фото (33) 😔")
 
 # === СТАТИСТИКА ===
 def get_stats_text(chat_id: int) -> str:
@@ -721,7 +808,7 @@ async def cmd_admin(message: Message):
             f"🏘 Групп: {len(data['group_stats'])}\n"
             f"💬 Обращений: {sum(sum(s.values()) for s in data['group_stats'].values())}\n"
             f"🎨 Pollinations API: подключен\n"
-            f"👁️ Vision: " + VISION_MODEL + "\n"
+            f"👁️ Vision: {VISION_MODEL}\n"
             f"⏱ Задержка текста: {FREE_WAIT}с\n"
             f"⏱ Задержка изображений: {IMAGE_WAIT}с")
     await message.answer(text)
@@ -739,6 +826,7 @@ async def main():
     print(f"👁️ Распознавание фото: активировано")
     print(f"⏱ Задержка текста: {FREE_WAIT}с")
     print(f"⏱ Задержка изображений: {IMAGE_WAIT}с")
+    print(f"🔢 Коды ошибок в ответах")
     print("=" * 50)
     
     await dp.start_polling(bot)
