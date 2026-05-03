@@ -18,21 +18,18 @@ from asyncio import Lock
 BOT_TOKEN = "8644894856:AAGRX-aggF3oc6shx6QGhFYACf00S4mddXE"
 POLLINATIONS_API_KEY = "sk_1SyVl5uOEUAvt7jYgGtUP40uFOaABdCP"
 
-GROQ_API_KEYS = [
-    "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",
-    "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",
-    "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"
-]
+# Только один ключ
+GROQ_API_KEY = "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"
 
 ADMIN_ID = 6689292068
 
 # === ПРОВЕРКА ===
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не найден!")
-if not GROQ_API_KEYS:
-    raise ValueError("GROQ_API_KEYS не найдены!")
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY не найден!")
 
-print(f"✅ Бот запускается с {len(GROQ_API_KEYS)} ключами Groq")
+print(f"✅ Бот запускается с ключом Groq")
 print(f"🎨 Генерация изображений активирована")
 print(f"👁️ Распознавание фото активировано")
 
@@ -254,24 +251,19 @@ def clean_response(text: str) -> str:
     
     return text
 
-# === БЕЗОПАСНОЕ РЕДАКТИРОВАНИЕ СООБЩЕНИЙ ===
-async def safe_edit_text(message: Message, text: str, reply_markup=None, parse_mode=None):
-    """Безопасное редактирование сообщения (игнорирует ошибку 'not modified')"""
+# === БЕЗОПАСНОЕ РЕДАКТИРОВАНИЕ ===
+async def safe_edit_text(message: Message, text: str, reply_markup=None):
     try:
         if reply_markup:
-            await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+            await message.edit_text(text, reply_markup=reply_markup)
         else:
-            await message.edit_text(text, parse_mode=parse_mode)
+            await message.edit_text(text)
     except Exception as e:
         if "message is not modified" not in str(e):
             logging.error(f"❌ Ошибка редактирования: {e}")
 
 # === API ЗАПРОС К GROQ ===
-current_key_index = 0
-
 async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is_group: bool = False) -> str:
-    global current_key_index
-    
     context = get_context(chat_id)
     memory = get_memory(chat_id)
     
@@ -300,39 +292,25 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
         "stop": ["<think>", "<thinking>"]
     }
     
-    async with key_lock:
-        for attempt in range(len(GROQ_API_KEYS) * 2):
-            api_key = GROQ_API_KEYS[current_key_index]
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            answer = data["choices"][0]["message"]["content"]
-                            answer = clean_response(answer)
-                            return answer
-                        elif resp.status == 429:
-                            current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
-                            await asyncio.sleep(1)
-                            continue
-                        else:
-                            current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
-                            continue
-            except:
-                current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
-                continue
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
     
-    return "⚠️ Сейчас большая нагрузка, попробуй через минуту 😊"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    answer = data["choices"][0]["message"]["content"]
+                    return clean_response(answer)
+                else:
+                    return "⚠️ Сейчас большая нагрузка, попробуй через минуту 😊"
+    except:
+        return "⚠️ Сейчас большая нагрузка, попробуй через минуту 😊"
 
-# === РАСПОЗНАВАНИЕ ФОТО (VISION) ===
+# === РАСПОЗНАВАНИЕ ФОТО ===
 async def describe_photo(photo_url: str, question: str = "Что на этом фото? Опиши подробно") -> str:
-    global current_key_index
-    
     url = "https://api.groq.com/openai/v1/chat/completions"
     
     payload = {
@@ -350,33 +328,22 @@ async def describe_photo(photo_url: str, question: str = "Что на этом �
         "max_tokens": 300
     }
     
-    async with key_lock:
-        for attempt in range(len(GROQ_API_KEYS)):
-            api_key = GROQ_API_KEYS[current_key_index]
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            answer = data["choices"][0]["message"]["content"]
-                            return clean_response(answer)
-                        elif resp.status == 429:
-                            current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
-                            await asyncio.sleep(1)
-                            continue
-                        else:
-                            current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
-                            continue
-            except:
-                current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
-                continue
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
     
-    return "Не удалось распознать фото 😔"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    answer = data["choices"][0]["message"]["content"]
+                    return clean_response(answer)
+                else:
+                    return "Не удалось распознать фото 😔"
+    except:
+        return "Не удалось распознать фото 😔"
 
 # === ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ===
 async def generate_image(prompt: str, user_id: int) -> Tuple[bool, str]:
@@ -696,7 +663,7 @@ async def handle_private(message: Message):
     await thinking_msg.delete()
     await message.answer(response)
 
-# === CALLBACK ОБРАБОТЧИК (С ЗАЩИТОЙ ОТ ДВОЙНОГО НАЖАТИЯ) ===
+# === CALLBACK ОБРАБОТЧИК ===
 @dp.callback_query()
 async def handle_callback(callback: CallbackQuery):
     await callback.answer()
@@ -753,7 +720,6 @@ async def cmd_admin(message: Message):
             f"👥 Пользователей: {len(data['users'])}\n"
             f"🏘 Групп: {len(data['group_stats'])}\n"
             f"💬 Обращений: {sum(sum(s.values()) for s in data['group_stats'].values())}\n"
-            f"🔑 Ключей Groq: {len(GROQ_API_KEYS)}\n"
             f"🎨 Pollinations API: подключен\n"
             f"👁️ Vision: " + VISION_MODEL + "\n"
             f"⏱ Задержка текста: {FREE_WAIT}с\n"
