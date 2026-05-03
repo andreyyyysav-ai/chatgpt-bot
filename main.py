@@ -246,13 +246,18 @@ def clean_response(text: str) -> str:
     text = text.strip()
     
     if not text or len(text) < 2:
-        return "Извини, произошла ошибка обработки ответа 😊"
+        return "Извини, ошибка обработки (22) 😊"
     
     return text
 
-# === БЕЗОПАСНОЕ РЕДАКТИРОВАНИЕ ===
+# === БЕЗОПАСНОЕ РЕДАКТИРОВАНИЕ (ИСПРАВЛЕНО) ===
 async def safe_edit_text(message: Message, text: str, reply_markup=None):
+    """Безопасное редактирование - проверяет что текст изменился"""
     try:
+        current = message.text or message.caption or ""
+        if current == text:
+            return  # Не редактируем если текст тот же
+        
         if reply_markup:
             await message.edit_text(text, reply_markup=reply_markup)
         else:
@@ -261,7 +266,7 @@ async def safe_edit_text(message: Message, text: str, reply_markup=None):
         if "message is not modified" not in str(e):
             logging.error(f"❌ Ошибка редактирования: {e}")
 
-# === API ЗАПРОС К GROQ (С КОДАМИ ОШИБОК) ===
+# === API ЗАПРОС К GROQ ===
 async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is_group: bool = False) -> str:
     context = get_context(chat_id)
     memory = get_memory(chat_id)
@@ -307,8 +312,8 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
                         answer = data["choices"][0]["message"]["content"]
                         return clean_response(answer)
                     except Exception as e:
-                        logging.error(f"❌ Ошибка парсинга ответа (22): {e}")
-                        return "⚠️ Ошибка обработки ответа (22) 😊"
+                        logging.error(f"❌ Ошибка парсинга (22): {e}")
+                        return "⚠️ Ошибка обработки (22) 😊"
                         
                 elif status == 429:
                     logging.warning(f"⚠️ Rate limit (10)")
@@ -323,11 +328,11 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
                     return "⚠️ Ключ заблокирован (12) 😊"
                     
                 elif status == 413:
-                    logging.error(f"❌ Запрос слишком большой (11)")
+                    logging.error(f"❌ Запрос большой (11)")
                     return "⚠️ Запрос слишком большой (11) 😊"
                     
                 elif status >= 500:
-                    logging.error(f"❌ Ошибка сервера Groq (14-{status})")
+                    logging.error(f"❌ Ошибка сервера (14-{status})")
                     return f"⚠️ Ошибка сервера (14-{status}) 😊"
                     
                 else:
@@ -335,7 +340,7 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
                     return f"⚠️ Ошибка API (14-{status}) 😊"
                     
     except asyncio.TimeoutError:
-        logging.error(f"⏱ Таймаут запроса (20)")
+        logging.error(f"⏱ Таймаут (20)")
         return "⚠️ Таймаут запроса (20) 😊"
         
     except aiohttp.ClientConnectionError:
@@ -346,7 +351,7 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
         logging.error(f"❌ Неизвестная ошибка (99): {e}")
         return "⚠️ Ошибка (99) 😊"
 
-# === РАСПОЗНАВАНИЕ ФОТО (С КОДАМИ ОШИБОК) ===
+# === РАСПОЗНАВАНИЕ ФОТО ===
 async def describe_photo(photo_url: str, question: str = "Что на этом фото? Опиши подробно") -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
     
@@ -381,7 +386,7 @@ async def describe_photo(photo_url: str, question: str = "Что на этом �
                         answer = data["choices"][0]["message"]["content"]
                         return clean_response(answer)
                     except:
-                        return "👁️ Ошибка обработки фото (30) 😔"
+                        return "👁️ Ошибка обработки (30) 😔"
                         
                 elif status == 429:
                     return "👁️ Слишком много запросов (30-10) 😔"
@@ -401,7 +406,7 @@ async def describe_photo(photo_url: str, question: str = "Что на этом �
     except:
         return "👁️ Ошибка распознавания (30-99) 😔"
 
-# === ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (С КОДАМИ ОШИБОК) ===
+# === ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ===
 async def generate_image(prompt: str, user_id: int) -> Tuple[bool, str]:
     can, wait = check_rate_limit(user_id, is_image=True)
     if not can:
@@ -422,14 +427,12 @@ async def generate_image(prompt: str, user_id: int) -> Tuple[bool, str]:
                         return True, image_url
                         
                     elif status == 429:
-                        logging.warning(f"⚠️ Pollinations rate limit (40-10)")
                         if attempt < MAX_IMAGE_RETRIES - 1:
                             await asyncio.sleep(3)
                             continue
                         return False, "⚠️ Сервер перегружен (40-10) 😊"
                         
                     elif status >= 500:
-                        logging.error(f"❌ Сервер Pollinations недоступен (41-{status})")
                         if attempt < MAX_IMAGE_RETRIES - 1:
                             await asyncio.sleep(2)
                             continue
@@ -446,8 +449,7 @@ async def generate_image(prompt: str, user_id: int) -> Tuple[bool, str]:
                 continue
             return False, "⚠️ Таймаут генерации (40-20) 😊"
             
-        except Exception as e:
-            logging.error(f"❌ Ошибка сети при генерации (40-21): {e}")
+        except:
             if attempt < MAX_IMAGE_RETRIES - 1:
                 await asyncio.sleep(2)
                 continue
@@ -750,7 +752,7 @@ async def handle_private(message: Message):
     await thinking_msg.delete()
     await message.answer(response)
 
-# === CALLBACK ОБРАБОТЧИК ===
+# === CALLBACK ОБРАБОТЧИК (ИСПРАВЛЕН) ===
 @dp.callback_query()
 async def handle_callback(callback: CallbackQuery):
     await callback.answer()
@@ -826,7 +828,6 @@ async def main():
     print(f"👁️ Распознавание фото: активировано")
     print(f"⏱ Задержка текста: {FREE_WAIT}с")
     print(f"⏱ Задержка изображений: {IMAGE_WAIT}с")
-    print(f"🔢 Коды ошибок в ответах")
     print("=" * 50)
     
     await dp.start_polling(bot)
