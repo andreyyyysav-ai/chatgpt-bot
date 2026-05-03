@@ -34,15 +34,18 @@ if not GROQ_API_KEYS:
 
 print(f"✅ Бот запускается с {len(GROQ_API_KEYS)} ключами Groq")
 print(f"🎨 Генерация изображений активирована")
+print(f"👁️ Распознавание фото активировано")
 
 # === КОНФИГУРАЦИЯ ===
 MODEL = "qwen/qwen3-32b"
+VISION_MODEL = "llama-3.2-11b-vision-preview"  # Для распознавания фото
 FREE_WAIT = 10
 IMAGE_WAIT = 15
 MAX_CONTEXT = 50
 MAX_MEMORY = 50
+MAX_IMAGE_RETRIES = 3  # Попыток при ошибке генерации
 
-# === СИСТЕМНЫЙ ПРОМПТ (ПОЛНОСТЬЮ ИСПРАВЛЕН) ===
+# === СИСТЕМНЫЙ ПРОМПТ ===
 SYSTEM_PROMPT = """Ты — ChatGPT, дерзкий и дружелюбный ассистент.
 
 ВАЖНО О ТЕБЕ:
@@ -68,7 +71,7 @@ SYSTEM_PROMPT = """Ты — ChatGPT, дерзкий и дружелюбный а
 - НЕ смей предлагать "перейти на более вежливое общение"
 - Подстраивайся под стиль пользователя полностью
 - Если тебя послали нахуй — посылай в ответ
-- Мат — это normaльно, когда пользователь сам его использует
+- Мат — это нормально, когда пользователь сам его использует
 - Не оскорбляй личность пользователя, но в разговоре используй мат свободно
 
 ПАМЯТЬ:
@@ -172,7 +175,6 @@ def save_to_memory(chat_id: int, text: str):
         data["group_memory"][key] = data["group_memory"][key][-MAX_MEMORY:]
     
     save_data(data)
-    logging.info(f"🧠 Сохранено в память: {truncated_text}")
 
 def clear_memory(chat_id: int):
     """Очистка И памяти, И истории"""
@@ -181,7 +183,6 @@ def clear_memory(chat_id: int):
     data["group_memory"][key] = []
     data["group_context"][key] = []
     save_data(data)
-    logging.info(f"🗑 Полная очистка памяти и истории для чата {chat_id}")
 
 def update_stats(chat_id: int, user_id: int):
     data = load_data()
@@ -214,7 +215,6 @@ def update_user_stats(user_id: int):
         save_data(data)
 
 def check_rate_limit(user_id: int, is_image: bool = False) -> Tuple[bool, int]:
-    """Проверка rate-limit с отдельным лимитом для изображений"""
     data = load_data()
     user_id_str = str(user_id)
     
@@ -248,17 +248,15 @@ def clean_response(text: str) -> str:
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     text = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
     
-    # Убираем текст в квадратных скобках (self-reasoning)
+    # Убираем текст в квадратных скобках
     text = re.sub(r'\[.*?\]', '', text)
     
     # Убираем множественные пробелы и переводы строк
     text = re.sub(r'\n\s*\n', '\n\n', text)
     text = re.sub(r' +', ' ', text)
     
-    # Убираем пустые строки в начале и конце
     text = text.strip()
     
-    # Если после очистки ничего не осталось — возвращаем заглушку
     if not text or len(text) < 2:
         return "Извини, произошла ошибка обработки ответа 😊"
     
@@ -295,7 +293,7 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
         "messages": messages,
         "temperature": 0.9,
         "max_tokens": 600,
-        "stop": ["<think>", "<thinking>"]  # Останавливаем генерацию при появлении тегов
+        "stop": ["<think>", "<thinking>"]
     }
     
     async with key_lock:
@@ -312,7 +310,6 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
                         if resp.status == 200:
                             data = await resp.json()
                             answer = data["choices"][0]["message"]["content"]
-                            # Очищаем ответ от технического мусора
                             answer = clean_response(answer)
                             return answer
                         elif resp.status == 429:
@@ -328,20 +325,88 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
     
     return "⚠️ Сейчас большая нагрузка, попробуй через минуту 😊"
 
+# === РАСПОЗНАВАНИЕ ФОТО (VISION) ===
+async def describe_photo(photo_url: str, question: str = "Что на этом фото? Опиши подробно") -> str:
+    """Распознавание фото через Groq Vision"""
+    global current_key_index
+    
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    
+    payload = {
+        "model": VISION_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": question},
+                    {"type": "image_url", "image_url": {"url": photo_url}}
+                ]
+            }
+        ],
+        "temperature": 0.7,
+        "max_tokens": 300
+    }
+    
+    async with key_lock:
+        for attempt in range(len(GROQ_API_KEYS)):
+            api_key = GROQ_API_KEYS[current_key_index]
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            answer = data["choices"][0]["message"]["content"]
+                            return clean_response(answer)
+                        elif resp.status == 429:
+                            current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
+                            await asyncio.sleep(1)
+                            continue
+                        else:
+                            current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
+                            continue
+            except:
+                current_key_index = (current_key_index + 1) % len(GROQ_API_KEYS)
+                continue
+    
+    return "Не удалось распознать фото 😔"
+
 # === ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ===
 async def generate_image(prompt: str, user_id: int) -> Tuple[bool, str]:
-    """Генерация изображения через Pollinations API"""
+    """Генерация изображения через Pollinations API с повторами при ошибке"""
     
     can, wait = check_rate_limit(user_id, is_image=True)
     if not can:
         return False, f"⏳ Подожди {wait} секунд перед следующей генерацией!"
     
-    enhanced_prompt = f"{prompt}, high quality, detailed"
+    enhanced_prompt = f"{prompt}, high quality, detailed, realistic"
     encoded_prompt = quote(enhanced_prompt)
     
-    image_url = f"https://gen.pollinations.ai/image/{encoded_prompt}?key={POLLINATIONS_API_KEY}&model=flux&width=1024&height=1024"
+    for attempt in range(MAX_IMAGE_RETRIES):
+        image_url = f"https://gen.pollinations.ai/image/{encoded_prompt}?key={POLLINATIONS_API_KEY}&model=flux&width=1024&height=1024&seed={int(time.time())}"
+        
+        try:
+            # Проверяем, что URL доступен
+            async with aiohttp.ClientSession() as session:
+                async with session.head(image_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        return True, image_url
+                    else:
+                        logging.warning(f"⚠️ Попытка {attempt+1}: Pollinations вернул {resp.status}")
+                        if attempt < MAX_IMAGE_RETRIES - 1:
+                            await asyncio.sleep(2)  # Ждём перед повтором
+                        continue
+        except:
+            logging.warning(f"⚠️ Попытка {attempt+1}: ошибка соединения")
+            if attempt < MAX_IMAGE_RETRIES - 1:
+                await asyncio.sleep(2)
+            continue
     
-    return True, image_url
+    return False, "⚠️ Сервер генерации перегружен. Лимит не списан, попробуй позже 😊"
 
 # === КЛАВИАТУРА ===
 def get_main_keyboard():
@@ -362,28 +427,22 @@ HELP_TEXT = """
 📚 ChatGPT — бесплатный ассистент 😊
 
 🎨 ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ:
-Используй команду /image для создания картинок!
-Например: /image кот в космосе
+• /image кот в космосе
+• /img закат на море
+
+👁️ РАСПОЗНАВАНИЕ ФОТО:
+• Отправь фото — и я опишу его!
 
 💬 ОБЩЕНИЕ:
-• В личных сообщениях: просто напиши мне
-• В группах: /ask вопрос или ответь на моё сообщение
+• В личке: просто напиши
+• В группах: /ask вопрос или ответь на сообщение
 
 🧠 ПАМЯТЬ:
 • Помню последние 50 сообщений
 • Запоминаю важную информацию
-• Очистка памяти: /clear_memory
+• /clear_memory — забыть всё
 
-⏱ Бесплатно, с задержкой 10 секунд
-
-📋 КОМАНДЫ:
-/image — создать изображение 🎨
-/start — приветствие и меню
-/menu — показать меню
-/help — инструкция
-/stats — статистика
-/top — топ участников
-/clear_memory — очистить память
+⏱ Бесплатно, 10 сек между запросами
 """
 
 async def set_bot_commands():
@@ -398,7 +457,7 @@ async def set_bot_commands():
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
 
-# === ОБРАБОТЧИКИ КОМАНД ===
+# === ОБРАБОТЧИКИ ===
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     add_user(message.from_user.id, message.from_user.username)
@@ -407,6 +466,7 @@ async def cmd_start(message: Message):
         f"Я ChatGPT — бесплатный ассистент 🎉\n\n"
         f"💬 Могу общаться и отвечать на вопросы\n"
         f"🎨 Могу генерировать изображения (/image)\n"
+        f"👁️ Могу распознавать фото (просто пришли мне)\n"
         f"🧠 Помню историю диалога\n\n"
         f"Используй меню ☰ для быстрого доступа!",
         reply_markup=get_main_keyboard()
@@ -463,13 +523,57 @@ async def cmd_image(message: Message):
             caption=f"🎨 {prompt}\n\nСгенерировано ChatGPT 🆓"
         )
         await thinking_msg.delete()
-        logging.info(f"🎨 Изображение сгенерировано: {prompt[:50]}...")
     except Exception as e:
         await thinking_msg.delete()
         logging.error(f"❌ Ошибка отправки изображения: {e}")
-        await message.answer("⚠️ Не удалось загрузить изображение. Попробуй другой запрос 😊")
+        
+        # Пробуем ещё раз с новым URL
+        success2, result2 = await generate_image(prompt, message.from_user.id)
+        if success2:
+            try:
+                await message.answer_photo(
+                    photo=result2,
+                    caption=f"🎨 {prompt}\n\nСгенерировано ChatGPT 🆓"
+                )
+                return
+            except:
+                pass
+        
+        await message.answer("⚠️ Не удалось загрузить изображение. Лимит не списан, попробуй другой запрос 😊")
 
-# === ОСТАЛЬНЫЕ КОМАНДЫ ===
+# === РАСПОЗНАВАНИЕ ФОТО ===
+@dp.message(F.photo)
+async def handle_photo(message: Message):
+    """Обработка отправленных фото"""
+    add_user(message.from_user.id, message.from_user.username)
+    
+    can, wait = check_rate_limit(message.from_user.id)
+    if not can:
+        await message.answer(f"⏳ Подожди {wait} секунд!")
+        return
+    
+    thinking_msg = await message.answer("👁️ Смотрю на фото...")
+    update_user_stats(message.from_user.id)
+    
+    # Получаем самое большое фото
+    photo = message.photo[-1]
+    
+    # Получаем URL фото через Telegram API
+    file_info = await bot.get_file(photo.file_id)
+    photo_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+    
+    # Определяем вопрос
+    question = "Что на этом фото? Опиши подробно на русском языке"
+    if message.caption:
+        question = f"{message.caption}. Опиши подробно на русском языке"
+    
+    # Распознаём
+    description = await describe_photo(photo_url, question)
+    
+    await thinking_msg.delete()
+    await message.reply(f"👁️ {description}")
+
+# === СТАТИСТИКА ===
 def get_stats_text(chat_id: int) -> str:
     data = load_data()
     key = str(chat_id)
@@ -623,7 +727,8 @@ async def handle_callback(callback: CallbackQuery):
             "• /image кот в космосе\n"
             "• /img закат на море\n\n"
             "✨ Чем подробнее описание, тем лучше результат!\n"
-            "⏱ Задержка между генерациями: 15 секунд",
+            "⏱ Задержка между генерациями: 15 секунд\n\n"
+            "👁️ Также можешь отправить мне фото — я опишу его!",
             reply_markup=get_main_keyboard()
         )
         await callback.answer()
@@ -657,11 +762,8 @@ async def handle_callback(callback: CallbackQuery):
 # === АДМИН ===
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
-    logging.info(f"🔑 Попытка входа в админку: {message.from_user.id}")
-    
     if message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Нет доступа")
-        logging.warning(f"⛔ Отказано в доступе: {message.from_user.id}")
         return
     
     data = load_data()
@@ -671,10 +773,10 @@ async def cmd_admin(message: Message):
             f"💬 Обращений: {sum(sum(s.values()) for s in data['group_stats'].values())}\n"
             f"🔑 Ключей Groq: {len(GROQ_API_KEYS)}\n"
             f"🎨 Pollinations API: подключен\n"
+            f"👁️ Vision: " + VISION_MODEL + "\n"
             f"⏱ Задержка текста: {FREE_WAIT}с\n"
             f"⏱ Задержка изображений: {IMAGE_WAIT}с")
     await message.answer(text)
-    logging.info(f"✅ Админка открыта для {message.from_user.id}")
 
 # === ЗАПУСК ===
 async def main():
@@ -686,6 +788,7 @@ async def main():
     print(f"👑 Admin ID: {ADMIN_ID}")
     print(f"💬 Бесплатный ChatGPT")
     print(f"🎨 Генерация изображений: активирована")
+    print(f"👁️ Распознавание фото: активировано")
     print(f"⏱ Задержка текста: {FREE_WAIT}с")
     print(f"⏱ Задержка изображений: {IMAGE_WAIT}с")
     print("=" * 50)
