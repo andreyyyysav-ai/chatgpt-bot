@@ -38,12 +38,12 @@ print(f"👁️ Распознавание фото активировано")
 
 # === КОНФИГУРАЦИЯ ===
 MODEL = "qwen/qwen3-32b"
-VISION_MODEL = "llama-3.2-11b-vision-preview"  # Для распознавания фото
+VISION_MODEL = "llama-3.2-11b-vision-preview"
 FREE_WAIT = 10
 IMAGE_WAIT = 15
 MAX_CONTEXT = 50
 MAX_MEMORY = 50
-MAX_IMAGE_RETRIES = 3  # Попыток при ошибке генерации
+MAX_IMAGE_RETRIES = 3
 
 # === СИСТЕМНЫЙ ПРОМПТ ===
 SYSTEM_PROMPT = """Ты — ChatGPT, дерзкий и дружелюбный ассистент.
@@ -177,7 +177,6 @@ def save_to_memory(chat_id: int, text: str):
     save_data(data)
 
 def clear_memory(chat_id: int):
-    """Очистка И памяти, И истории"""
     data = load_data()
     key = str(chat_id)
     data["group_memory"][key] = []
@@ -241,26 +240,31 @@ def check_rate_limit(user_id: int, is_image: bool = False) -> Tuple[bool, int]:
         wait = int(wait_time - (now - last))
         return False, wait
 
-# === ОЧИСТКА ОТВЕТА ОТ ТЕХНИЧЕСКОГО МУСОРА ===
+# === ОЧИСТКА ОТВЕТА ===
 def clean_response(text: str) -> str:
-    """Убирает технический мусор из ответа"""
-    # Убираем <think>...</think>
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     text = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
-    
-    # Убираем текст в квадратных скобках
     text = re.sub(r'\[.*?\]', '', text)
-    
-    # Убираем множественные пробелы и переводы строк
     text = re.sub(r'\n\s*\n', '\n\n', text)
     text = re.sub(r' +', ' ', text)
-    
     text = text.strip()
     
     if not text or len(text) < 2:
         return "Извини, произошла ошибка обработки ответа 😊"
     
     return text
+
+# === БЕЗОПАСНОЕ РЕДАКТИРОВАНИЕ СООБЩЕНИЙ ===
+async def safe_edit_text(message: Message, text: str, reply_markup=None, parse_mode=None):
+    """Безопасное редактирование сообщения (игнорирует ошибку 'not modified')"""
+    try:
+        if reply_markup:
+            await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        else:
+            await message.edit_text(text, parse_mode=parse_mode)
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            logging.error(f"❌ Ошибка редактирования: {e}")
 
 # === API ЗАПРОС К GROQ ===
 current_key_index = 0
@@ -327,7 +331,6 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
 
 # === РАСПОЗНАВАНИЕ ФОТО (VISION) ===
 async def describe_photo(photo_url: str, question: str = "Что на этом фото? Опиши подробно") -> str:
-    """Распознавание фото через Groq Vision"""
     global current_key_index
     
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -377,8 +380,6 @@ async def describe_photo(photo_url: str, question: str = "Что на этом �
 
 # === ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ===
 async def generate_image(prompt: str, user_id: int) -> Tuple[bool, str]:
-    """Генерация изображения через Pollinations API с повторами при ошибке"""
-    
     can, wait = check_rate_limit(user_id, is_image=True)
     if not can:
         return False, f"⏳ Подожди {wait} секунд перед следующей генерацией!"
@@ -390,18 +391,15 @@ async def generate_image(prompt: str, user_id: int) -> Tuple[bool, str]:
         image_url = f"https://gen.pollinations.ai/image/{encoded_prompt}?key={POLLINATIONS_API_KEY}&model=flux&width=1024&height=1024&seed={int(time.time())}"
         
         try:
-            # Проверяем, что URL доступен
             async with aiohttp.ClientSession() as session:
                 async with session.head(image_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status == 200:
                         return True, image_url
                     else:
-                        logging.warning(f"⚠️ Попытка {attempt+1}: Pollinations вернул {resp.status}")
                         if attempt < MAX_IMAGE_RETRIES - 1:
-                            await asyncio.sleep(2)  # Ждём перед повтором
+                            await asyncio.sleep(2)
                         continue
         except:
-            logging.warning(f"⚠️ Попытка {attempt+1}: ошибка соединения")
             if attempt < MAX_IMAGE_RETRIES - 1:
                 await asyncio.sleep(2)
             continue
@@ -523,28 +521,13 @@ async def cmd_image(message: Message):
             caption=f"🎨 {prompt}\n\nСгенерировано ChatGPT 🆓"
         )
         await thinking_msg.delete()
-    except Exception as e:
+    except:
         await thinking_msg.delete()
-        logging.error(f"❌ Ошибка отправки изображения: {e}")
-        
-        # Пробуем ещё раз с новым URL
-        success2, result2 = await generate_image(prompt, message.from_user.id)
-        if success2:
-            try:
-                await message.answer_photo(
-                    photo=result2,
-                    caption=f"🎨 {prompt}\n\nСгенерировано ChatGPT 🆓"
-                )
-                return
-            except:
-                pass
-        
         await message.answer("⚠️ Не удалось загрузить изображение. Лимит не списан, попробуй другой запрос 😊")
 
 # === РАСПОЗНАВАНИЕ ФОТО ===
 @dp.message(F.photo)
 async def handle_photo(message: Message):
-    """Обработка отправленных фото"""
     add_user(message.from_user.id, message.from_user.username)
     
     can, wait = check_rate_limit(message.from_user.id)
@@ -555,19 +538,14 @@ async def handle_photo(message: Message):
     thinking_msg = await message.answer("👁️ Смотрю на фото...")
     update_user_stats(message.from_user.id)
     
-    # Получаем самое большое фото
     photo = message.photo[-1]
-    
-    # Получаем URL фото через Telegram API
     file_info = await bot.get_file(photo.file_id)
     photo_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
     
-    # Определяем вопрос
     question = "Что на этом фото? Опиши подробно на русском языке"
     if message.caption:
         question = f"{message.caption}. Опиши подробно на русском языке"
     
-    # Распознаём
     description = await describe_photo(photo_url, question)
     
     await thinking_msg.delete()
@@ -718,46 +696,50 @@ async def handle_private(message: Message):
     await thinking_msg.delete()
     await message.answer(response)
 
+# === CALLBACK ОБРАБОТЧИК (С ЗАЩИТОЙ ОТ ДВОЙНОГО НАЖАТИЯ) ===
 @dp.callback_query()
 async def handle_callback(callback: CallbackQuery):
-    if callback.data == "image_help":
-        await callback.message.edit_text(
-            "🎨 Генерация изображений\n\n"
-            "Используй команду /image с описанием:\n"
-            "• /image кот в космосе\n"
-            "• /img закат на море\n\n"
-            "✨ Чем подробнее описание, тем лучше результат!\n"
-            "⏱ Задержка между генерациями: 15 секунд\n\n"
-            "👁️ Также можешь отправить мне фото — я опишу его!",
-            reply_markup=get_main_keyboard()
-        )
-        await callback.answer()
-        
-    elif callback.data == "stats":
-        if callback.message.chat.type == "private":
-            data = load_data()
-            user = data["users"].get(str(callback.from_user.id), {})
-            text = f"📊 Твоя статистика\n\n💬 Сообщений: {user.get('total_messages', 0)}"
-        else:
-            text = get_stats_text(callback.message.chat.id)
-        await callback.message.edit_text(text)
-        await callback.answer()
-        
-    elif callback.data == "top":
-        if callback.message.chat.type == "private":
-            await callback.answer("Топ доступен только в группах!", show_alert=True)
-            return
-        await callback.message.edit_text(await get_top_users_text(callback.message.chat.id))
-        await callback.answer()
-        
-    elif callback.data == "clear_memory":
-        clear_memory(callback.message.chat.id)
-        await callback.message.edit_text("🗑 Память и история полностью очищены!\nЯ всё забыл 😊")
-        await callback.answer("Готово!", show_alert=True)
-        
-    elif callback.data == "help":
-        await callback.message.edit_text(HELP_TEXT, reply_markup=get_main_keyboard())
-        await callback.answer()
+    await callback.answer()
+    
+    try:
+        if callback.data == "image_help":
+            await safe_edit_text(
+                callback.message,
+                "🎨 Генерация изображений\n\n"
+                "Используй команду /image с описанием:\n"
+                "• /image кот в космосе\n"
+                "• /img закат на море\n\n"
+                "✨ Чем подробнее описание, тем лучше результат!\n"
+                "⏱ Задержка между генерациями: 15 секунд\n\n"
+                "👁️ Также можешь отправить мне фото — я опишу его!",
+                reply_markup=get_main_keyboard()
+            )
+            
+        elif callback.data == "stats":
+            if callback.message.chat.type == "private":
+                data = load_data()
+                user = data["users"].get(str(callback.from_user.id), {})
+                text = f"📊 Твоя статистика\n\n💬 Сообщений: {user.get('total_messages', 0)}"
+            else:
+                text = get_stats_text(callback.message.chat.id)
+            await safe_edit_text(callback.message, text)
+            
+        elif callback.data == "top":
+            if callback.message.chat.type == "private":
+                await callback.answer("Топ доступен только в группах!", show_alert=True)
+                return
+            await safe_edit_text(callback.message, await get_top_users_text(callback.message.chat.id))
+            
+        elif callback.data == "clear_memory":
+            clear_memory(callback.message.chat.id)
+            await safe_edit_text(callback.message, "🗑 Память и история полностью очищены!\nЯ всё забыл 😊")
+            await callback.answer("Готово!", show_alert=True)
+            
+        elif callback.data == "help":
+            await safe_edit_text(callback.message, HELP_TEXT, reply_markup=get_main_keyboard())
+            
+    except Exception as e:
+        logging.error(f"❌ Ошибка в callback: {e}")
 
 # === АДМИН ===
 @dp.message(Command("admin"))
