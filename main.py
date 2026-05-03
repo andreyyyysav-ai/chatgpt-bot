@@ -19,7 +19,7 @@ BOT_TOKEN = "8644894856:AAGRX-aggF3oc6shx6QGhFYACf00S4mddXE"
 POLLINATIONS_API_KEY = "sk_1SyVl5uOEUAvt7jYgGtUP40uFOaABdCP"
 
 GROQ_API_KEYS = [
-    "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",
+    "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",
     "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",
     "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"
 ]
