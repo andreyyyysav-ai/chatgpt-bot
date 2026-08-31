@@ -17,7 +17,7 @@ from asyncio import Lock
 # === ТВОИ КЛЮЧИ ===
 BOT_TOKEN = "8644894856:AAGRX-aggF3oc6shx6QGhFYACf00S4mddXE"
 POLLINATIONS_API_KEY = "sk_1SyVl5uOEUAvt7jYgGtUP40uFOaABdCP"
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "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"
 
 ADMIN_ID = 6689292068
 
