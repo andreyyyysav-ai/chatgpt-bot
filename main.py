@@ -44,8 +44,8 @@ print(f"🎨 Генерация изображений активирована"
 print(f"👁️ Распознавание фото активировано")
 
 # === КОНФИГУРАЦИЯ ===
-MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct"
-VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+MODEL = "groq/meta-llama/llama-4-maverick-17b-128e-instruct"
+VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct"
 FREE_WAIT = 10          # задержка между текстовыми запросами (сек)
 IMAGE_WAIT = 15         # задержка между генерациями картинок (сек)
 MAX_CONTEXT = 50
@@ -585,7 +585,7 @@ HELP_TEXT = """
 • /clear_memory — забыть всё
 
 ⏱ Бесплатно, 10 сек между запросами (для текста), 15 сек для картинок.
-(test bot 1)
+(test bot 2)
 """
 
 async def set_bot_commands():
