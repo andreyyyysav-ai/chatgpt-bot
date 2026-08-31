@@ -585,6 +585,7 @@ HELP_TEXT = """
 • /clear_memory — забыть всё
 
 ⏱ Бесплатно, 10 сек между запросами (для текста), 15 сек для картинок.
+(test bot 1)
 """
 
 async def set_bot_commands():
