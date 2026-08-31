@@ -31,7 +31,7 @@ print(f"✅ Бот запускается с ключом Groq")
 print(f"🎨 Генерация изображений активирована")
 
 # === КОНФИГУРАЦИЯ ===
-MODEL = "openai/gpt-oss-120b"  # ✅ РАБОТАЕТ
+MODEL = "qwen/qwen3.6-27b"          # ✅ РАБОТАЕТ (из официального списка)
 FREE_WAIT = 10
 IMAGE_WAIT = 15
 MAX_CONTEXT = 50
@@ -39,7 +39,7 @@ MAX_MEMORY = 50
 MAX_IMAGE_RETRIES = 3
 MAX_GROQ_RETRIES = 2
 
-# === СИСТЕМНЫЙ ПРОМПТ (максимально жёсткий) ===
+# === СИСТЕМНЫЙ ПРОМПТ (жёсткий) ===
 SYSTEM_PROMPT = """Ты — ChatGPT.
 
 **ЖЁСТКИЕ ПРАВИЛА (НАРУШАТЬ ЗАПРЕЩЕНО):**
@@ -229,9 +229,9 @@ def check_rate_limit(user_id: int, is_image: bool = False) -> Tuple[bool, int]:
         wait = int(wait_time - (now - last))
         return False, wait
 
-# === СУПЕР-ОЧИСТКА ОТВЕТА (удаляет всё лишнее) ===
+# === СУПЕР-ОЧИСТКА ОТВЕТА ===
 def clean_response(text: str) -> str:
-    # 1. Удаляем все варианты тегов рассуждений
+    # Удаляем все теги рассуждений
     patterns = [
         r'<think>.*?</think>',
         r'<thinking>.*?</thinking>',
@@ -248,33 +248,25 @@ def clean_response(text: str) -> str:
     for pattern in patterns:
         text = re.sub(pattern, '', text, flags=re.DOTALL | re.IGNORECASE)
     
-    # 2. Удаляем маркеры списков
+    # Удаляем маркеры списков
     text = re.sub(r'^[0-9]+\\.\\s*', '', text, flags=re.MULTILINE)
     text = re.sub(r'^[-*]\\s*', '', text, flags=re.MULTILINE)
     
-    # 3. Удаляем лишние переносы и пробелы
+    # Убираем лишние переносы и пробелы
     text = re.sub(r'\n\s*\n', '\n\n', text)
     text = re.sub(r' +', ' ', text)
     text = text.strip()
     
-    # 4. Если текст начинается с "Привет", оставляем только первое предложение
-    if text.startswith('Привет'):
-        sentences = text.split('. ')
-        if len(sentences) > 2:
-            text = '. '.join(sentences[:2]) + '.'
-    
-    # 5. Если после очистки пусто или слишком коротко
-    if not text or len(text) < 2:
-        return "Привет! Я ChatGPT, твой бесплатный ассистент. Чем могу помочь? 😊🚀"
-    
-    # 6. Проверяем, не осталось ли английского текста
+    # Если остался английский текст (более 5 символов подряд), удаляем его
     if re.search(r'[A-Za-z]{5,}', text):
-        # Если много английского, оставляем только русскую часть
         russian_part = re.findall(r'[А-Яа-яЁё0-9\\s\\.,!?]+', text)
         if russian_part:
             text = ''.join(russian_part).strip()
         else:
             return "Привет! Я ChatGPT, твой бесплатный ассистент. Чем могу помочь? 😊🚀"
+    
+    if not text or len(text) < 2:
+        return "Привет! Я ChatGPT, твой бесплатный ассистент. Чем могу помочь? 😊🚀"
     
     return text
 
@@ -293,7 +285,7 @@ async def safe_edit_text(message: Message, text: str, reply_markup=None):
         if "message is not modified" not in str(e):
             logging.error(f"❌ Ошибка редактирования: {e}")
 
-# === API ЗАПРОС К GROQ С ПОДАВЛЕНИЕМ THINK ===
+# === API ЗАПРОС К GROQ ===
 async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is_group: bool = False) -> str:
     context = get_context(chat_id)
     memory = get_memory(chat_id)
@@ -320,8 +312,7 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
         "messages": messages,
         "temperature": 0.7,
         "max_tokens": 600,
-        "reasoning_effort": "minimal",  # КЛЮЧЕВОЙ ПАРАМЕТР
-        "stop": ["<think>", "<thinking>", "Here's a thinking"]
+        "stop": ["<think>", "<thinking>", "Here's a thinking"]   # Без reasoning_effort!
     }
     
     headers = {
@@ -339,8 +330,7 @@ async def ask_groq(prompt: str, chat_id: int, username: Optional[str] = None, is
                         try:
                             data = await resp.json()
                             answer = data["choices"][0]["message"]["content"]
-                            cleaned = clean_response(answer)
-                            return cleaned
+                            return clean_response(answer)
                         except Exception as e:
                             logging.error(f"❌ Ошибка парсинга: {e}")
                             return "⚠️ Ошибка обработки. Попробуйте ещё раз. 😊"
